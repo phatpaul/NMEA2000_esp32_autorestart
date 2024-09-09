@@ -54,7 +54,7 @@ const char *TAG = "n2k-esp32";
 
 static const int TIMEOUT_OFFLINE = 256; // # of timeouts to consider offline
 
-tNMEA2000_esp32xx::tNMEA2000_esp32xx(int _TxPin, int _RxPin, unsigned long recP, unsigned long logP) : tNMEA2000(), RxPin(_RxPin), TxPin(_TxPin)
+tNMEA2000_esp32xx::tNMEA2000_esp32xx(int _TxPin, int _RxPin, unsigned long recoveryPeriod, unsigned long logPeriod) : tNMEA2000(), RxPin(_RxPin), TxPin(_TxPin)
 {
     if (RxPin < 0 || TxPin < 0)
     {

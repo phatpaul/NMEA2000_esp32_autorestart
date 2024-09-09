@@ -5,7 +5,7 @@
 class tNMEA2000_esp32xx : public tNMEA2000
 {
 public:
-    tNMEA2000_esp32xx(int _TxPin, int _RxPin, unsigned long recP = 0, unsigned long logPeriod = 0);
+    tNMEA2000_esp32xx(int _TxPin, int _RxPin, unsigned long recoveryPeriod = 0, unsigned long logPeriod = 0);
     typedef enum
     {
         ST_STOPPED,
