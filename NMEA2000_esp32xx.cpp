@@ -62,10 +62,8 @@ tNMEA2000_esp32xx::tNMEA2000_esp32xx(int _TxPin, int _RxPin, unsigned long recP,
     }
     else
     {
-        // timers.addAction(logP,[this](){logStatus();});
-        // timers.addAction(recP,[this](){checkRecovery();});
-        recTimer = tN2kSyncScheduler(false, recP, 0);
-        logTimer = tN2kSyncScheduler(false, logP, 0);
+        recoveryTimer = tN2kSyncScheduler(false, recoveryPeriod, 0);
+        logTimer = tN2kSyncScheduler(false, logPeriod, 0);
     }
 }
 
@@ -94,6 +92,7 @@ bool tNMEA2000_esp32xx::CANSendFrame(unsigned long id, unsigned char len, const 
     logDebug(LOG_MSG, "twai transmit id %ld, len %d", LOGID(id), (int)len);
     return true;
 }
+
 bool tNMEA2000_esp32xx::CANOpen()
 {
     if (disabled)
@@ -109,13 +108,14 @@ bool tNMEA2000_esp32xx::CANOpen()
     }
     else
     {
-        logDebug(LOG_INFO, "CANOpen ok");
+        logDebug(LOG_DEBUG, "CANOpen ok");
     }
     // Start timers now.
-    recTimer.UpdateNextTime();
+    recoveryTimer.UpdateNextTime();
     logTimer.UpdateNextTime();
     return true;
 }
+
 bool tNMEA2000_esp32xx::CANGetFrame(unsigned long &id, unsigned char &len, unsigned char *buf)
 {
     if (disabled)
@@ -144,13 +144,16 @@ bool tNMEA2000_esp32xx::CANGetFrame(unsigned long &id, unsigned char &len, unsig
     }
     return true;
 }
+
 void tNMEA2000_esp32xx::initDriver()
 {
     if (disabled)
+    {
         return;
+    }
     twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)TxPin, (gpio_num_t)RxPin, TWAI_MODE_NORMAL);
     g_config.tx_queue_len = 20;
-    g_config.intr_flags |= ESP_INTR_FLAG_LOWMED;  // Might be needed if you run out of LEVEL1 interrupts.
+    g_config.intr_flags |= ESP_INTR_FLAG_LOWMED; // Might be needed if you run out of LEVEL1 interrupts.
     twai_timing_config_t t_config = TWAI_TIMING_CONFIG_250KBITS();
     twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
     esp_err_t rt = twai_driver_install(&g_config, &t_config, &f_config);
@@ -163,6 +166,7 @@ void tNMEA2000_esp32xx::initDriver()
         logDebug(LOG_ERR, "twai driver init failed: %x", (int)rt);
     }
 }
+
 // This will be called on Open() before any other initialization. Inherit this, if buffers can be set for the driver
 // and you want to change size of library send frame buffer size. See e.g. NMEA2000_teensy.cpp.
 void tNMEA2000_esp32xx::InitCANFrameBuffers()
@@ -186,10 +190,7 @@ tNMEA2000_esp32xx::Status tNMEA2000_esp32xx::getStatus()
         rt.state = ST_DISABLED;
         return rt;
     }
-    if (twai_get_status_info(&state) != ESP_OK)
-    {
-        return rt;
-    }
+    ESP_ERROR_CHECK(twai_get_status_info(&state));
     switch (state.state)
     {
     case TWAI_STATE_STOPPED:
@@ -217,38 +218,44 @@ tNMEA2000_esp32xx::Status tNMEA2000_esp32xx::getStatus()
     }
     return rt;
 }
-bool tNMEA2000_esp32xx::checkRecovery()
+
+void tNMEA2000_esp32xx::checkRecovery()
 {
     if (disabled)
-        return false;
+    {
+        return;
+    }
+
     Status canState = getStatus();
-    bool strt = false;
     if (canState.state != tNMEA2000_esp32xx::ST_RUNNING)
     {
         if (canState.state == tNMEA2000_esp32xx::ST_BUS_OFF)
         {
-            strt = true;
-            bool rt = startRecovery();
-            logDebug(LOG_INFO, "twai BUS_OFF: start can recovery - result %d", (int)rt);
+            // Bus-Off > Recovering
+            twai_initiate_recovery(); // Needs 128 occurrences of bus free signal
+            logDebug(LOG_DEBUG, "twai BUS_OFF --> recovery");
+            lastRecoveryStart = N2kMillis();
         }
         if (canState.state == tNMEA2000_esp32xx::ST_STOPPED)
         {
-            bool rt = CANOpen();
-            logDebug(LOG_INFO, "twai STOPPED: restart can driver - result %d", (int)rt);
+            // Stopped > Running
+            ESP_ERROR_CHECK_WITHOUT_ABORT(twai_start());
+            logDebug(LOG_DEBUG, "twai STOPPED --> start");
         }
     }
-    return strt;
+    return;
 }
 
 void tNMEA2000_esp32xx::loop()
 {
     if (disabled)
-        return;
-
-    // timers.loop();
-    if (recTimer.IsTime())
     {
-        recTimer.UpdateNextTime();
+        return;
+    }
+
+    if (recoveryTimer.IsTime())
+    {
+        recoveryTimer.UpdateNextTime();
         checkRecovery();
     }
     if (logTimer.IsTime())
@@ -272,20 +279,6 @@ tNMEA2000_esp32xx::Status tNMEA2000_esp32xx::logStatus()
     return canState;
 }
 
-bool tNMEA2000_esp32xx::startRecovery()
-{
-    if (disabled)
-        return false;
-    lastRecoveryStart = N2kMillis();
-    esp_err_t rt = twai_driver_uninstall();
-    if (rt != ESP_OK)
-    {
-        logDebug(LOG_ERR, "twai: deinit for recovery failed with %x", (int)rt);
-    }
-    initDriver();
-    bool frt = CANOpen();
-    return frt;
-}
 const char *tNMEA2000_esp32xx::stateStr(const tNMEA2000_esp32xx::STATE &st)
 {
     switch (st)

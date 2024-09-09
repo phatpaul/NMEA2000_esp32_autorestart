@@ -51,14 +51,13 @@ protected:
 
 private:
     void initDriver();
-    bool startRecovery();
-    bool checkRecovery();
+    void checkRecovery();
     Status logStatus();
     int RxPin;
     int TxPin;
     uint32_t txTimeouts = 0;
     // GwIntervalRunner timers;
-    tN2kSyncScheduler recTimer;
+    tN2kSyncScheduler recoveryTimer;
     tN2kSyncScheduler logTimer;
     bool disabled = false;
     unsigned long lastRecoveryStart = 0;
