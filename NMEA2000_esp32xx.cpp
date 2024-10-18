@@ -4,6 +4,8 @@ NMEA2000_esp32xx.cpp
 Copyright (c) 2015-2020 Timo Lappalainen, Kave Oy, www.kave.fi
 Copyright (c) 2023 Jaume Clarens "jiauka"
 2024 - Improved with error handling by wellenvogel - see https://github.com/wellenvogel/esp32-nmea2000/issues/67
+2024/10/18 - Improved with proper CAN bus recovery process. see https://github.com/phatpaul/NMEA2000_esp32xx
+
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of
 this software and associated documentation files (the "Software"), to deal in
@@ -27,9 +29,9 @@ OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #define LOGID(id) ((id >> 8) & 0x1ffff)
 
+#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG /* Enable this to show debug logging for this file only. */
 #include "esp_log.h"
-const char *TAG = "n2k-esp32";
-#if 1 // defined(NMEA2000_DEBUG)
+
 #define logDebug(level, fmt, args...)                     \
     do                                                    \
     {                                                     \
@@ -48,13 +50,21 @@ const char *TAG = "n2k-esp32";
         }                                                 \
         ESP_LOG_LEVEL_LOCAL(esp_level, TAG, fmt, ##args); \
     } while (0)
-#else
-#define logDebug(level, fmt, args...)
-#endif
+
+const char *TAG = "N2K-drv"; // just a tag for logging
 
 static const int TIMEOUT_OFFLINE = 256; // # of timeouts to consider offline
 
-tNMEA2000_esp32xx::tNMEA2000_esp32xx(int _TxPin, int _RxPin, unsigned long recoveryPeriod, unsigned long logPeriod) : tNMEA2000(), RxPin(_RxPin), TxPin(_TxPin)
+/**
+ * @brief Construct a new tNMEA2000 esp32xx::tNMEA2000 esp32xx object
+ *
+ * @param _TxPin CAN bus Tx pin #
+ * @param _RxPin CAN bus Rx pin #
+ * @param recoveryPeriod Interval in ms to wait before CAN bus recovery after BUS_OFF condition. Default: 0 <- immediately start recovery.
+ * @param logPeriod Interval in ms for periodic logging of stats. Default: 0 <- disabled.
+ */
+tNMEA2000_esp32xx::tNMEA2000_esp32xx(int _TxPin, int _RxPin, unsigned long recoveryPeriod, unsigned long logPeriod)
+    : tNMEA2000(), RxPin(_RxPin), TxPin(_TxPin)
 {
     if (RxPin < 0 || TxPin < 0)
     {
@@ -70,7 +80,10 @@ tNMEA2000_esp32xx::tNMEA2000_esp32xx(int _TxPin, int _RxPin, unsigned long recov
 bool tNMEA2000_esp32xx::CANSendFrame(unsigned long id, unsigned char len, const unsigned char *buf, bool wait_sent)
 {
     if (disabled)
+    {
         return true;
+    }
+
     twai_message_t message;
     memset(&message, 0, sizeof(message));
     message.identifier = id;
@@ -78,16 +91,26 @@ bool tNMEA2000_esp32xx::CANSendFrame(unsigned long id, unsigned char len, const 
     message.data_length_code = len;
     memcpy(message.data, buf, len);
     esp_err_t rt = twai_transmit(&message, 0);
-    if (rt != ESP_OK)
+    if (rt == ESP_ERR_INVALID_STATE)
     {
-        if (rt == ESP_ERR_TIMEOUT)
-        {
-            if (txTimeouts < TIMEOUT_OFFLINE)
-                txTimeouts++;
-        }
-        logDebug(LOG_MSG, "twai transmit for %ld failed: %x", LOGID(id), (int)rt);
+        // Probably driver not in RUNNING state, don't spam the console here.
         return false;
     }
+    if (rt == ESP_ERR_TIMEOUT)
+    {
+        if (txTimeouts < TIMEOUT_OFFLINE)
+        {
+            txTimeouts++;
+        }
+        logDebug(LOG_DEBUG, "twai tx timeout");
+        return false;
+    }
+    if (ESP_OK != rt)
+    {
+        logDebug(LOG_ERR, "twai tx %ld failed: %x", LOGID(id), (int)rt);
+        return false;
+    }
+
     txTimeouts = 0;
     logDebug(LOG_MSG, "twai transmit id %ld, len %d", LOGID(id), (int)len);
     return true;
@@ -104,6 +127,7 @@ bool tNMEA2000_esp32xx::CANOpen()
     if (rt != ESP_OK)
     {
         logDebug(LOG_ERR, "CANOpen failed: %x", (int)rt);
+        disabled = true;
         return false;
     }
     else
@@ -111,7 +135,6 @@ bool tNMEA2000_esp32xx::CANOpen()
         logDebug(LOG_DEBUG, "CANOpen ok");
     }
     // Start timers now.
-    recoveryTimer.UpdateNextTime();
     logTimer.UpdateNextTime();
     return true;
 }
@@ -119,7 +142,9 @@ bool tNMEA2000_esp32xx::CANOpen()
 bool tNMEA2000_esp32xx::CANGetFrame(unsigned long &id, unsigned char &len, unsigned char *buf)
 {
     if (disabled)
+    {
         return false;
+    }
     twai_message_t message;
     esp_err_t rt = twai_receive(&message, 0);
     if (rt != ESP_OK)
@@ -164,6 +189,7 @@ void tNMEA2000_esp32xx::initDriver()
     else
     {
         logDebug(LOG_ERR, "twai driver init failed: %x", (int)rt);
+        disabled = true;
     }
 }
 
@@ -181,16 +207,22 @@ void tNMEA2000_esp32xx::InitCANFrameBuffers()
     }
     tNMEA2000::InitCANFrameBuffers();
 }
+
 tNMEA2000_esp32xx::Status tNMEA2000_esp32xx::getStatus()
 {
-    twai_status_info_t state;
     Status rt;
     if (disabled)
     {
         rt.state = ST_DISABLED;
         return rt;
     }
-    ESP_ERROR_CHECK(twai_get_status_info(&state));
+    twai_status_info_t state;
+    if (ESP_OK != twai_get_status_info(&state))
+    {
+        rt.state = ST_DISABLED;
+        return rt;
+    }
+
     switch (state.state)
     {
     case TWAI_STATE_STOPPED:
@@ -225,24 +257,39 @@ void tNMEA2000_esp32xx::checkRecovery()
     {
         return;
     }
-
-    Status canState = getStatus();
-    if (canState.state != tNMEA2000_esp32xx::ST_RUNNING)
+    twai_status_info_t state;
+    if (ESP_OK != twai_get_status_info(&state))
     {
-        if (canState.state == tNMEA2000_esp32xx::ST_BUS_OFF)
+        logDebug(LOG_ERR, "twai driver broken");
+        disabled = true; // twai driver is broken, no need to keep trying and spamming logs
+        return;
+    }
+
+    if (TWAI_STATE_BUS_OFF == state.state)
+    {
+        // Bus-Off > Recovering
+        const bool zeroWaitPeriod = (0 == recoveryTimer.GetPeriod());
+        if (!zeroWaitPeriod && recoveryTimer.IsDisabled())
         {
-            // Bus-Off > Recovering
-            twai_initiate_recovery(); // Needs 128 occurrences of bus free signal
-            logDebug(LOG_DEBUG, "twai BUS_OFF --> recovery");
-            lastRecoveryStart = N2kMillis();
+            logDebug(LOG_DEBUG, "twai BUS_OFF --> wait");
+            recoveryTimer.UpdateNextTime(); // start wait timer
         }
-        if (canState.state == tNMEA2000_esp32xx::ST_STOPPED)
+        if (zeroWaitPeriod || recoveryTimer.IsTime())
         {
-            // Stopped > Running
-            ESP_ERROR_CHECK_WITHOUT_ABORT(twai_start());
-            logDebug(LOG_DEBUG, "twai STOPPED --> start");
+            logDebug(LOG_DEBUG, "twai BUS_OFF --> recovery");
+            twai_initiate_recovery(); // Needs 128 occurrences of bus free signal
+            lastRecoveryStart = N2kMillis();
+            recoveryTimer.Disable();
         }
     }
+    if (TWAI_STATE_STOPPED == state.state)
+    {
+        // Stopped > Running
+        twai_start();
+        logDebug(LOG_DEBUG, "twai STOPPED --> start");
+        // Now the higher-level NMEA2000 library should to be restarted!  How to do it?
+    }
+
     return;
 }
 
@@ -252,12 +299,8 @@ void tNMEA2000_esp32xx::loop()
     {
         return;
     }
+    checkRecovery();
 
-    if (recoveryTimer.IsTime())
-    {
-        recoveryTimer.UpdateNextTime();
-        checkRecovery();
-    }
     if (logTimer.IsTime())
     {
         logTimer.UpdateNextTime();
