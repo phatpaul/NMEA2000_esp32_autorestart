@@ -60,7 +60,7 @@ static const int TIMEOUT_OFFLINE = 256; // # of timeouts to consider offline
  *
  * @param _TxPin CAN bus Tx pin #
  * @param _RxPin CAN bus Rx pin #
- * @param recoveryPeriod Interval in ms to wait before CAN bus recovery after BUS_OFF condition. Default: 0 <- immediately start recovery.
+ * @param recoveryPeriod Interval in ms to wait before CAN bus recovery after BUS_OFF condition. Set 0 to disable auto recovery.
  * @param logPeriod Interval in ms for periodic logging of stats. Default: 0 <- disabled.
  */
 tNMEA2000_esp32xx::tNMEA2000_esp32xx(int _TxPin, int _RxPin, unsigned long recoveryPeriod, unsigned long logPeriod)
@@ -253,6 +253,7 @@ tNMEA2000_esp32xx::Status tNMEA2000_esp32xx::getStatus()
 
 void tNMEA2000_esp32xx::checkRecovery()
 {
+    const bool autoRecoveryDisabled = (0 == recoveryTimer.GetPeriod());
     if (disabled)
     {
         return;
@@ -268,31 +269,42 @@ void tNMEA2000_esp32xx::checkRecovery()
     if (TWAI_STATE_BUS_OFF == state.state)
     {
         // Bus-Off > Recovering
-        const bool zeroWaitPeriod = (0 == recoveryTimer.GetPeriod());
-        if (!zeroWaitPeriod && recoveryTimer.IsDisabled())
+        if (autoRecoveryDisabled)
         {
-            logDebug(LOG_DEBUG, "twai BUS_OFF --> wait");
-            recoveryTimer.UpdateNextTime(); // start wait timer
+            logDebug(LOG_ERR, "twai BUS_OFF");
         }
-        if (zeroWaitPeriod || recoveryTimer.IsTime())
+        else
         {
             logDebug(LOG_DEBUG, "twai BUS_OFF --> recovery");
             twai_initiate_recovery(); // Needs 128 occurrences of bus free signal
-            lastRecoveryStart = N2kMillis();
-            recoveryTimer.Disable();
         }
     }
+
     if (TWAI_STATE_STOPPED == state.state)
     {
         // Stopped > Running
-        twai_start();
-        logDebug(LOG_DEBUG, "twai STOPPED --> start");
-        // Now the higher-level NMEA2000 library should to be restarted!  How to do it?
+        if (!autoRecoveryDisabled)
+        {
+            logDebug(LOG_DEBUG, "twai STOPPED --> start");
+            twai_start();
+            recoveryTimer.UpdateNextTime(); // start wait timer
+        }
+    }
+
+    if (recoveryTimer.IsTime())
+    {
+        recoveryTimer.Disable(); // one-shot
+        // Now the higher-level NMEA2000 library should to be restarted!
+        Restart();
     }
 
     return;
 }
 
+/**
+ * @brief This must be called periodically from your task loop
+ * 
+ */
 void tNMEA2000_esp32xx::loop()
 {
     if (disabled)

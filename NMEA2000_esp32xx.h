@@ -5,7 +5,7 @@
 class tNMEA2000_esp32xx : public tNMEA2000
 {
 public:
-    tNMEA2000_esp32xx(int _TxPin, int _RxPin, unsigned long recoveryPeriod = 0, unsigned long logPeriod = 0);
+    tNMEA2000_esp32xx(int _TxPin, int _RxPin, unsigned long recoveryPeriod = 3000, unsigned long logPeriod = 0);
     typedef enum
     {
         ST_STOPPED,
@@ -28,7 +28,6 @@ public:
         STATE state = ST_ERROR;
     } Status;
     Status getStatus();
-    unsigned long getLastRecoveryStart() { return lastRecoveryStart; }
     void loop();
     static const char *stateStr(const STATE &st);
     virtual bool CANOpen();
@@ -56,11 +55,9 @@ private:
     int RxPin;
     int TxPin;
     uint32_t txTimeouts = 0;
-    // GwIntervalRunner timers;
     tN2kSyncScheduler recoveryTimer;
     tN2kSyncScheduler logTimer;
     bool disabled = false;
-    unsigned long lastRecoveryStart = 0;
 };
 
 #endif
