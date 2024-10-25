@@ -6,13 +6,18 @@ class tNMEA2000_esp32xx : public tNMEA2000
 {
 public:
     tNMEA2000_esp32xx(int _TxPin, int _RxPin, unsigned long recoveryPeriod = 3000, unsigned long logPeriod = 0);
+
+    static const int LOG_ERR = 0;
+    static const int LOG_INFO = 1;
+    static const int LOG_DEBUG = 2;
+    static const int LOG_MSG = 3;
     typedef enum
     {
         ST_STOPPED,
         ST_RUNNING,
         ST_BUS_OFF,
         ST_RECOVERING,
-        ST_OFFLINE,
+        ST_RESTARTING,
         ST_DISABLED,
         ST_ERROR
     } STATE;
@@ -27,16 +32,12 @@ public:
         uint32_t tx_timeouts = 0;
         STATE state = ST_ERROR;
     } Status;
-    Status getStatus();
-    void loop();
     static const char *stateStr(const STATE &st);
-    virtual bool CANOpen();
-    virtual ~tNMEA2000_esp32xx(){};
-    static const int LOG_ERR = 0;
-    static const int LOG_INFO = 1;
-    static const int LOG_DEBUG = 2;
-    static const int LOG_MSG = 3;
+    Status getStatus();
 
+    virtual bool CANOpen();
+    void loop();
+    virtual ~tNMEA2000_esp32xx() {};
 protected:
     // Virtual functions for different interfaces. Currently there are own classes
     // for Arduino due internal CAN (NMEA2000_due), external MCP2515 SPI CAN bus controller (NMEA2000_mcp),
@@ -49,15 +50,13 @@ protected:
     virtual void logDebug(int level, const char *fmt, ...) {}
 
 private:
-    void initDriver();
-    void checkRecovery();
     Status logStatus();
     int RxPin;
     int TxPin;
     uint32_t txTimeouts = 0;
     tN2kSyncScheduler recoveryTimer;
     tN2kSyncScheduler logTimer;
-    bool disabled = false;
+    STATE state = ST_STOPPED;
 };
 
 #endif
