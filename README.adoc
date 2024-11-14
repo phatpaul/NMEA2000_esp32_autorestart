@@ -31,6 +31,8 @@ Some tweaks to sdkconfig that are recommended:
   CONFIG_TWAI_ERRATA_FIX_RX_FIFO_CORRUPT=y
   CONFIG_FREERTOS_HZ=1000
 
+NOTE: CONFIG_TWAI_ERRATA_FIX_TX_INTR_LOST causes crashes!  See: https://github.com/espressif/esp-idf/issues/9697
+
 == Changes ==
 
  * 2023-06-08 - Jaume Clarens "jiauka"
