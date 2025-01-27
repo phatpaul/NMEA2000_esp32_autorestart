@@ -37,7 +37,7 @@ public:
 
     virtual bool CANOpen();
     void loop();
-    virtual ~tNMEA2000_esp32xx() {};
+    virtual ~tNMEA2000_esp32xx();
 protected:
     // Virtual functions for different interfaces. Currently there are own classes
     // for Arduino due internal CAN (NMEA2000_due), external MCP2515 SPI CAN bus controller (NMEA2000_mcp),
@@ -47,6 +47,7 @@ protected:
     // This will be called on Open() before any other initialization. Inherit this, if buffers can be set for the driver
     // and you want to change size of library send frame buffer size. See e.g. NMEA2000_teensy.cpp.
     virtual void InitCANFrameBuffers();
+    virtual void DeinitCANFrameBuffers();
     virtual void logDebug(int level, const char *fmt, ...) {}
 
 private:

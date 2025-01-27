@@ -235,7 +235,7 @@ void tNMEA2000_esp32xx::InitCANFrameBuffers()
     {
         twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)TxPin, (gpio_num_t)RxPin, TWAI_MODE_NORMAL);
         g_config.tx_queue_len = 20;
-        g_config.rx_queue_len = 40; // need a large Rx buffer to prevent rxmiss
+        g_config.rx_queue_len = 40;                  // need a large Rx buffer to prevent rxmiss
         g_config.intr_flags |= ESP_INTR_FLAG_LOWMED; // LOWMED might be needed if you run out of LEVEL1 interrupts.
         twai_timing_config_t t_config = TWAI_TIMING_CONFIG_250KBITS();
         twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
@@ -253,6 +253,24 @@ void tNMEA2000_esp32xx::InitCANFrameBuffers()
 
     // call parent function
     tNMEA2000::InitCANFrameBuffers();
+}
+
+// Uninstall the driver.  Undo what is done in InitCANFrameBuffers()
+void tNMEA2000_esp32xx::DeinitCANFrameBuffers()
+{
+    if (state != ST_DISABLED)
+    {
+        twai_stop();
+        twai_driver_uninstall();
+        state = ST_DISABLED;
+    }
+}
+
+// Destructor to automatically uninstall the driver if the object goes out of scope or is deleted.
+tNMEA2000_esp32xx::~tNMEA2000_esp32xx()
+{
+    DeinitCANFrameBuffers();
+    // Base destructor automatically called after this
 }
 
 /**
