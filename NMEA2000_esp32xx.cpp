@@ -29,7 +29,7 @@ OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #define LOGID(id) ((id >> 8) & 0x1ffff)
 
-#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG /* Enable this to show debug logging for this file only. */
+//#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG /* Enable this to show debug logging for this file only. */
 #include "esp_log.h"
 
 #define logDebug(level, fmt, args...)                     \
