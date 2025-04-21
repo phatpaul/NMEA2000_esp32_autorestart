@@ -237,7 +237,24 @@ void tNMEA2000_esp32xx::InitCANFrameBuffers()
         g_config.tx_queue_len = 20;
         g_config.rx_queue_len = 40;                  // need a large Rx buffer to prevent rxmiss
         g_config.intr_flags |= ESP_INTR_FLAG_LOWMED; // LOWMED might be needed if you run out of LEVEL1 interrupts.
-        twai_timing_config_t t_config = TWAI_TIMING_CONFIG_250KBITS();
+
+        twai_timing_config_t t_config;
+        // ESP_IDF DEFAULT TIMING CONFIGURATION gives 80% sample point
+        // #define TWAI_TIMING_CONFIG_250KBITS()   {.brp = 16, .tseg_1 = 15, .tseg_2 = 4, .sjw = 3, .triple_sampling = false}
+        // t_config = TWAI_TIMING_CONFIG_250KBITS();
+
+        // But NMEA2000 requires sample point at 87%
+        t_config.brp = 20; // divide 80MHz APB clock by 20 = 4MHz. At 250Kbps, 4MHz = 16 time quanta (including sync)
+        // Want sample at 87%: sample_point = (0.875 * 16) = 14
+        t_config.tseg_1 =13; // tseg_1 = (sample_point - sync) = (14 - 1) = 13
+        t_config.tseg_2 =2;  // tseg_2 = (total - tseg_1) = (16 - 14) = 2
+        t_config.sjw =1; //synchronization jump width should be 1 time quanta (why?)
+        /* triple_sampling
+        * true: the bus is sampled three times; recommended for low/medium speed buses (class A and B) where filtering spikes on the bus line is beneficial
+        * false: the bus is sampled once; recommended for high speed buses (SAE class C)*/
+        t_config.triple_sampling=true; 
+
+        // Filter config
         twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
         esp_err_t rt = twai_driver_install(&g_config, &t_config, &f_config);
         if (rt == ESP_OK)
