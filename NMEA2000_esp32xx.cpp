@@ -234,8 +234,9 @@ void tNMEA2000_esp32xx::InitCANFrameBuffers()
     else
     {
         twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)TxPin, (gpio_num_t)RxPin, TWAI_MODE_NORMAL);
-        g_config.tx_queue_len = 20;
-        g_config.rx_queue_len = 40;                  // need a large Rx buffer to prevent rxmiss
+        // Use configured buffer sizes, with reasonable defaults if not set
+        g_config.tx_queue_len = (MaxCANSendFrames > 0) ? MaxCANSendFrames : 80;  // Default 80 for burst handling
+        g_config.rx_queue_len = MaxCANReceiveFrames;  // Use configured buffer size instead of hardcoded 40
         g_config.intr_flags |= ESP_INTR_FLAG_LOWMED; // LOWMED might be needed if you run out of LEVEL1 interrupts.
 
         twai_timing_config_t t_config;
