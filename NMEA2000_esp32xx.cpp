@@ -378,6 +378,6 @@ void tNMEA2000_esp32xx::loop()
     if (logTimer.IsTime())
     {
         logTimer.UpdateNextTime();
-        //logStatus();
+        logStatus();
     }
 }
