@@ -24,13 +24,13 @@ HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTIO
 CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
 OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
+//#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG /* Enable this to show debug logging for this file only. */
+#include "esp_log.h"
+
 #include "NMEA2000_esp32xx.h"
 #include "driver/twai.h"
 
 #define LOGID(id) ((id >> 8) & 0x1ffff)
-
-//#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG /* Enable this to show debug logging for this file only. */
-#include "esp_log.h"
 
 #define logDebug(level, fmt, args...)                     \
     do                                                    \
@@ -91,7 +91,7 @@ tNMEA2000_esp32xx::Status tNMEA2000_esp32xx::getStatus()
     rt.tx_failed = twai_status.tx_failed_count;
     rt.rx_missed = twai_status.rx_missed_count;
     rt.rx_overrun = twai_status.rx_overrun_count;
-    rt.tx_timeouts = txTimeouts;
+    rt.tx_queued = twai_status.msgs_to_tx;
     rt.state = state;
     return rt;
 }
@@ -99,16 +99,17 @@ tNMEA2000_esp32xx::Status tNMEA2000_esp32xx::getStatus()
 tNMEA2000_esp32xx::Status tNMEA2000_esp32xx::logStatus()
 {
     Status canState = getStatus();
-    logDebug(LOG_INFO, "twai state %s, rxerr %d, txerr %d, txfail %d, txtimeout %d, rxmiss %d, rxoverrun %d",
-             stateStr(canState.state),
-             canState.rx_errors,
-             canState.tx_errors,
-             canState.tx_failed,
-             canState.tx_timeouts,
-             canState.rx_missed,
-             canState.rx_overrun);
+    logDebug(LOG_INFO, "TWAI state %s, rxerr %d, txerr %d, txfail %d, rxmiss %d, rxoverrun %d, txqueued %d",
+        stateStr(canState.state),
+        canState.rx_errors,
+        canState.tx_errors,
+        canState.tx_failed,
+        canState.rx_missed,
+        canState.rx_overrun,
+        canState.tx_queued);
     return canState;
 }
+
 
 /**
  * @brief Construct a new tNMEA2000 esp32xx::tNMEA2000 esp32xx object
@@ -138,7 +139,7 @@ bool tNMEA2000_esp32xx::CANSendFrame(unsigned long id, unsigned char len, const 
     {
         return false;
     }
-    logDebug(LOG_MSG, "twai transmit id %ld, len %d", LOGID(id), (int)len);
+    logDebug(LOG_MSG, "TWAI transmit id %ld, len %d", LOGID(id), (int)len);
 
     twai_message_t message;
     memset(&message, 0, sizeof(message));
@@ -146,7 +147,7 @@ bool tNMEA2000_esp32xx::CANSendFrame(unsigned long id, unsigned char len, const 
     message.extd = 1;
     message.data_length_code = len;
     memcpy(message.data, buf, len);
-    esp_err_t rt = twai_transmit(&message, 0);
+    esp_err_t rt = twai_transmit(&message, pdMS_TO_TICKS(10)); // 10ms timeout instead of 0
     if (rt == ESP_ERR_INVALID_STATE)
     {
         // Probably driver not in RUNNING state, don't spam the console here.
@@ -154,17 +155,14 @@ bool tNMEA2000_esp32xx::CANSendFrame(unsigned long id, unsigned char len, const 
     }
     if (rt == ESP_ERR_TIMEOUT)
     {
-        txTimeouts++;
-        logDebug(LOG_DEBUG, "twai tx timeout");
+        logDebug(LOG_DEBUG, "TWAI tx timeout");
         return false;
     }
     if (ESP_OK != rt)
     {
-        logDebug(LOG_ERR, "twai tx %ld failed: %x", LOGID(id), (int)rt);
+        logDebug(LOG_ERR, "TWAI tx %ld failed: %x", LOGID(id), (int)rt);
         return false;
     }
-
-    txTimeouts = 0;
 
     return true;
 }
@@ -189,10 +187,10 @@ bool tNMEA2000_esp32xx::CANGetFrame(unsigned long &id, unsigned char &len, unsig
     len = message.data_length_code;
     if (len > 8)
     {
-        logDebug(LOG_DEBUG, "twai: received invalid message %ld, len %d", LOGID(id), len);
+        logDebug(LOG_DEBUG, "TWAI: received invalid message %ld, len %d", LOGID(id), len);
         len = 8;
     }
-    logDebug(LOG_MSG, "twai rcv id=%d,len=%d, ext=%d", LOGID(message.identifier), message.data_length_code, message.extd);
+    logDebug(LOG_MSG, "TWAI rcv id=%d,len=%d, ext=%d", LOGID(message.identifier), message.data_length_code, message.extd);
     if (!message.rtr)
     {
         memcpy(buf, message.data, len);
@@ -204,7 +202,7 @@ bool tNMEA2000_esp32xx::CANOpen()
 {
     if (ST_STOPPED != state) // CANOpen should only be called in STOPPED state
     {
-        logDebug(LOG_INFO, "CANOpen invalid state");
+        logDebug(LOG_ERR, "CANOpen invalid state");
         return true;
     }
     esp_err_t rt = twai_start();
@@ -217,6 +215,27 @@ bool tNMEA2000_esp32xx::CANOpen()
     else
     {
         logDebug(LOG_DEBUG, "CANOpen ok");
+
+        // Send a probe frame to detect other nodes on the bus
+        // Use ISO Address Claim (PGN 60928) with invalid temporary address
+        // This is safe because: 1) Standard NMEA2000 message, 2) Invalid claim won't cause conflicts
+        twai_message_t probe_message;
+        memset(&probe_message, 0, sizeof(probe_message));
+        probe_message.identifier = 0x18EEFFFE;  // PGN 60928, src 254 (temporary), dest 255 (global)
+        probe_message.extd = 1;
+        probe_message.data_length_code = 8;
+        // Invalid address claim data - ensures no real address conflict
+        probe_message.data[0] = 0xFF;  // Unique Number (invalid)
+        probe_message.data[1] = 0xFF;
+        probe_message.data[2] = 0xFF;
+        probe_message.data[3] = 0xFF;
+        probe_message.data[4] = 0xFF;  // Device Instance + System Instance (invalid)
+        probe_message.data[5] = 0xFF;  // Function + Device Class (invalid)
+        probe_message.data[6] = 0xFF;  // Reserved + Industry Group (invalid)
+        probe_message.data[7] = 0xFE;  // Reserved + Address (254 = temporary)
+
+        logDebug(LOG_DEBUG, "Sending bus probe frame...");
+        twai_transmit(&probe_message, pdMS_TO_TICKS(50)); // 50ms timeout
     }
     // Start timers now.
     logTimer.UpdateNextTime();
@@ -229,7 +248,7 @@ void tNMEA2000_esp32xx::InitCANFrameBuffers()
 {
     if (ST_DISABLED == state)
     {
-        logDebug(LOG_INFO, "twai init - disabled");
+        logDebug(LOG_INFO, "TWAI init - disabled");
     }
     else
     {
@@ -247,24 +266,38 @@ void tNMEA2000_esp32xx::InitCANFrameBuffers()
         // But NMEA2000 requires sample point at 87%
         t_config.brp = 20; // divide 80MHz APB clock by 20 = 4MHz. At 250Kbps, 4MHz = 16 time quanta (including sync)
         // Want sample at 87%: sample_point = (0.875 * 16) = 14
-        t_config.tseg_1 =13; // tseg_1 = (sample_point - sync) = (14 - 1) = 13
-        t_config.tseg_2 =2;  // tseg_2 = (total - tseg_1) = (16 - 14) = 2
-        t_config.sjw =1; //synchronization jump width should be 1 time quanta (why?)
+        t_config.tseg_1 = 13; // tseg_1 = (sample_point - sync) = (14 - 1) = 13
+        t_config.tseg_2 = 2;  // tseg_2 = (total - tseg_1) = (16 - 14) = 2
+        t_config.sjw = 1; //synchronization jump width should be 1 time quanta (why?)
         /* triple_sampling
         * true: the bus is sampled three times; recommended for low/medium speed buses (class A and B) where filtering spikes on the bus line is beneficial
         * false: the bus is sampled once; recommended for high speed buses (SAE class C)*/
-        t_config.triple_sampling=true;
+        t_config.triple_sampling = true;
+
+        logDebug(LOG_DEBUG, "TWAI timing config: brp=%d tseg1=%d tseg2=%d sjw=%d triple_sampling=%d",
+            t_config.brp, t_config.tseg_1, t_config.tseg_2, t_config.sjw, t_config.triple_sampling);
 
         // Filter config
         twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
         esp_err_t rt = twai_driver_install(&g_config, &t_config, &f_config);
         if (rt == ESP_OK)
         {
-            logDebug(LOG_INFO, "twai driver initialzed, rx=%d,tx=%d", (int)RxPin, (int)TxPin);
+            state = ST_STOPPED; // We start in STOPPED state, user must call CANOpen() to start
+            if (LOG_LOCAL_LEVEL >= ESP_LOG_DEBUG)
+            {
+                logDebug(LOG_DEBUG, "TWAI driver initialzed, rx=%d,tx=%d, tx_queue=%d, rx_queue=%d",
+                    (int)RxPin, (int)TxPin, g_config.tx_queue_len, g_config.rx_queue_len);
+                // Check initial status after driver install but before start
+                twai_status_info_t initial_status;
+                if (ESP_OK == twai_get_status_info(&initial_status)) {
+                    logDebug(LOG_DEBUG, "Initial TWAI status: TXerr=%d RXerr=%d state=%d",
+                        initial_status.tx_error_counter, initial_status.rx_error_counter, initial_status.state);
+                }
+            }
         }
         else
         {
-            logDebug(LOG_ERR, "twai driver init failed: %x", (int)rt);
+            logDebug(LOG_ERR, "TWAI driver init failed: %x", (int)rt);
             state = ST_DISABLED;
         }
     }
@@ -297,81 +330,132 @@ tNMEA2000_esp32xx::~tNMEA2000_esp32xx()
  */
 void tNMEA2000_esp32xx::loop()
 {
+
     // No way out of DISABLED state
     if (ST_DISABLED != state)
     {
+        const bool autoRecoveryEnabled = (0 != recoveryTimer.GetPeriod());
         twai_status_info_t twai_status;
         if (ESP_OK != twai_get_status_info(&twai_status))
         {
-            logDebug(LOG_ERR, "twai driver broken");
-            state = ST_DISABLED; // twai driver is broken, no need to keep trying and spamming logs
+            logDebug(LOG_ERR, "TWAI driver broken");
+            state = ST_DISABLED; // TWAI driver is broken, no need to keep trying and spamming logs
             return;
         }
 
-        const bool autoRecoveryEnabled = (0 != recoveryTimer.GetPeriod());
-
-        switch (twai_status.state)
+        tNMEA2000_esp32xx::STATE next_state = ST_INVALID;
+        // Some state transition are unconditional of current state, so are moved out of the switch()
+        if ((TWAI_STATE_STOPPED == twai_status.state) && (ST_STOPPED != state))
         {
-        case TWAI_STATE_STOPPED:
-            // Stopped > Running
-            if (autoRecoveryEnabled)
+            next_state = ST_STOPPED;
+        }
+        else if ((TWAI_STATE_BUS_OFF == twai_status.state) && (ST_BUS_OFF != state))
+        {
+            next_state = ST_BUS_OFF;
+        }
+        else if ((TWAI_STATE_RECOVERING == twai_status.state) && (ST_RECOVERING != state))
+        {
+            next_state = ST_RECOVERING;
+        }
+        // Note: We use TWAI_STATE_RUNNING as a condition in our state machine
+        else
+        {
+            switch (state)
             {
-                logDebug(LOG_DEBUG, "twai STOPPED --> start");
-                twai_start();
-                state = ST_RESTARTING;
-                txTimeouts = 0;
-                recoveryTimer.UpdateNextTime(); // start recovery timer
-            }
-            else
+            case ST_STOPPED:
             {
-                logDebug(LOG_DEBUG, "twai STOPPED");
-                state = ST_STOPPED;
-            }
-
-            break;
-        case TWAI_STATE_RUNNING:
-            if (txTimeouts >= TIMEOUT_OFFLINE)
-            {
-                twai_stop();
-                state = ST_STOPPED;
-            }
-            else if (autoRecoveryEnabled && (ST_RESTARTING == state))
-            {
-                if (recoveryTimer.IsTime())
+                if (TWAI_STATE_RUNNING == twai_status.state)
+                {
+                    // If stack or user called CANOpen(), keep track.
+                    next_state = ST_RUNNING;
+                    break;
+                }
+                if (autoRecoveryEnabled && recoveryTimer.IsTime())
                 {
                     recoveryTimer.Disable(); // one-shot
-                    // Now the higher-level NMEA2000 library should to be restarted!
-                    logDebug(LOG_DEBUG, "twai start --> Restart");
-                    tNMEA2000::Restart();
-                    state = ST_RUNNING;
+                    CANOpen();
+                    next_state = ST_RESTARTING;
+                    break;
                 }
             }
-            else
-            {
-                state = ST_RUNNING;
-            }
             break;
-        case TWAI_STATE_BUS_OFF:
-            // Bus-Off > Recovering
-            if (autoRecoveryEnabled)
+            case ST_RESTARTING:
             {
-                logDebug(LOG_DEBUG, "twai BUS_OFF --> recovery");
-                twai_initiate_recovery(); // Needs 128 occurrences of bus free signal
-                state = ST_RECOVERING;
-            }
-            else
-            {
-                logDebug(LOG_ERR, "twai BUS_OFF");
-                state = ST_BUS_OFF;
-            }
+                // Check if transmission caused error increment (indicates no other nodes)
+                bool other_nodes_present = (0 == twai_status.tx_error_counter);
 
+                // Only restart NMEA2000 library if we detected other nodes during probe
+                // This prevents bus flooding when we're the only device
+                if (other_nodes_present)
+                {
+                    // Now the higher-level NMEA2000 library should be restarted!
+                    tNMEA2000::Restart();
+                    next_state = ST_RUNNING;
+                }
+                else
+                {
+                    // No other nodes detected - go back offline to try again
+                    logDebug(LOG_DEBUG, "Bus probe indicates NO other nodes present (TXerr: %d)",
+                        twai_status.tx_error_counter);
+                    twai_stop();
+                    next_state = ST_STOPPED;
+                }
+            }
             break;
-        case TWAI_STATE_RECOVERING:
-            state = ST_RECOVERING;
+            case ST_RUNNING: // Normal running state
+            {
+                // TWAI_STATE_BUS_OFF is entered automatically when the hardware detects too many errors on the bus
+                // Transition to BUS_OFF is handled in common.
+
+                // Check for Error Passive condition with full queue - this causes the timeout cascade
+                if (twai_status.tx_error_counter >= 128) {
+                    logDebug(LOG_ERR, "Detected Error Passive (TXerr=%d, queue=%d) - (maybe disconnected or only node on bus)",
+                        twai_status.tx_error_counter, twai_status.msgs_to_tx);
+                    twai_stop();
+                    next_state = ST_STOPPED;
+                    break;
+                }
+            }
             break;
-        default:
-            state = ST_ERROR;
+            case ST_BUS_OFF:
+            {
+                if (autoRecoveryEnabled)
+                {
+                    // If auto recovery enabled, try to recover
+                    twai_initiate_recovery(); // Needs 128 occurrences of bus free signal
+                    next_state = ST_RECOVERING;
+                    break;
+                }
+            }
             break;
+            case ST_RECOVERING:
+            {
+                // TWAI driver should handle recovery and set state to STOPPED when successful
+                // Transition to STOPPED is handled in common
+            }
+            break;
+            case ST_DISABLED:
+                // No way out of DISABLED state
+                break;
+            case ST_ERROR:
+                // No way out of ERROR state
+                break;
+            default:
+                next_state = ST_ERROR;
+                break;
+            }
+        }
+
+        if (ST_INVALID != next_state)
+        {
+            // State changed. Do common stuff on state transitions.
+            if (ST_STOPPED == next_state)
+            {
+                // reload timer for waiting in STOPPED before restarting
+                recoveryTimer.UpdateNextTime();
+            }
+            logDebug(LOG_DEBUG, "TWAI %s --> %s", stateStr(state), stateStr(next_state));
+            state = next_state;
         }
     }
 

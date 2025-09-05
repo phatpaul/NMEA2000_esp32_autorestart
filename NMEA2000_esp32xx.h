@@ -5,7 +5,7 @@
 class tNMEA2000_esp32xx : public tNMEA2000
 {
 public:
-    tNMEA2000_esp32xx(int _TxPin, int _RxPin, unsigned long recoveryPeriod = 3000, unsigned long logPeriod = 0);
+    tNMEA2000_esp32xx(int _TxPin, int _RxPin, unsigned long recoveryPeriod = 6000, unsigned long logPeriod = 0);
 
     static const int LOG_ERR = 0;
     static const int LOG_INFO = 1;
@@ -13,6 +13,7 @@ public:
     static const int LOG_MSG = 3;
     typedef enum
     {
+        ST_INVALID,
         ST_STOPPED,
         ST_RUNNING,
         ST_BUS_OFF,
@@ -29,7 +30,7 @@ public:
         uint32_t tx_failed = 0;
         uint32_t rx_missed = 0;
         uint32_t rx_overrun = 0;
-        uint32_t tx_timeouts = 0;
+        uint32_t tx_queued = 0;
         STATE state = ST_ERROR;
     } Status;
     static const char *stateStr(const STATE &st);
@@ -48,13 +49,14 @@ protected:
     // and you want to change size of library send frame buffer size. See e.g. NMEA2000_teensy.cpp.
     virtual void InitCANFrameBuffers();
     virtual void DeinitCANFrameBuffers();
+
+private:
     virtual void logDebug(int level, const char *fmt, ...) {}
 
 private:
     Status logStatus();
     int RxPin;
     int TxPin;
-    uint32_t txTimeouts = 0;
     tN2kSyncScheduler recoveryTimer;
     tN2kSyncScheduler logTimer;
     STATE state = ST_STOPPED;
