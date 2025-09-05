@@ -25,13 +25,17 @@ A working example can be found at [NMEA2000-windesp32xx-idf](https://github.com/
 This driver contains an error recovery state-machine. It will automatically restart the N2K stack if the cable is disconnected/reconnected or if it reaches an error threshold that results in a BUS_OFF condition.
 
 ```mermaid
+---
+title: NMEA2000_esp32xx Driver State Machine
+---
 stateDiagram-v2
+
     [*] --> STOPPED
     
     STOPPED --> RESTARTING: (autoRecoveryEnabled && timeout)<br/>twai_start()<br/>SendDummyFrame()
     STOPPED --> RUNNING: started by N2K stack
     
-    RESTARTING --> RUNNING: tNMEA2000::Restart()
+    RESTARTING --> RUNNING: tNMEA2000..Restart()
     RESTARTING --> STOPPED: (TxErr>0)<br/>reset timeout
     
     RUNNING --> RECOVERING: CAN bus error
