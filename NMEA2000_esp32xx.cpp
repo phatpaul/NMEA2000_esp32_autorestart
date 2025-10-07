@@ -26,6 +26,7 @@ OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 //#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG /* Enable this to show debug logging for this file only. */
 #include "esp_log.h"
+#include <inttypes.h>
 
 #include "NMEA2000_esp32xx.h"
 #include "driver/twai.h"
@@ -99,14 +100,14 @@ tNMEA2000_esp32xx::Status tNMEA2000_esp32xx::getStatus()
 tNMEA2000_esp32xx::Status tNMEA2000_esp32xx::logStatus()
 {
     Status canState = getStatus();
-    logDebug(LOG_INFO, "TWAI state %s, rxerr %d, txerr %d, txfail %d, rxmiss %d, rxoverrun %d, txqueued %d",
+    logDebug(LOG_INFO, "TWAI state %s, rxerr %u, txerr %u, txfail %u, rxmiss %u, rxoverrun %u, txqueued %u",
         stateStr(canState.state),
-        canState.rx_errors,
-        canState.tx_errors,
-        canState.tx_failed,
-        canState.rx_missed,
-        canState.rx_overrun,
-        canState.tx_queued);
+        (unsigned)canState.rx_errors,
+        (unsigned)canState.tx_errors,
+        (unsigned)canState.tx_failed,
+        (unsigned)canState.rx_missed,
+        (unsigned)canState.rx_overrun,
+        (unsigned)canState.tx_queued);
     return canState;
 }
 
@@ -139,7 +140,7 @@ bool tNMEA2000_esp32xx::CANSendFrame(unsigned long id, unsigned char len, const 
     {
         return false;
     }
-    logDebug(LOG_MSG, "TWAI transmit id %ld, len %d", LOGID(id), (int)len);
+    logDebug(LOG_MSG, "TWAI transmit id %lu, len %d", (unsigned long)LOGID(id), (int)len);
 
     twai_message_t message;
     memset(&message, 0, sizeof(message));
@@ -160,7 +161,7 @@ bool tNMEA2000_esp32xx::CANSendFrame(unsigned long id, unsigned char len, const 
     }
     if (ESP_OK != rt)
     {
-        logDebug(LOG_ERR, "TWAI tx %ld failed: %x", LOGID(id), (int)rt);
+        logDebug(LOG_ERR, "TWAI tx %lu failed: %x", (unsigned long)LOGID(id), (int)rt);
         return false;
     }
 
@@ -187,10 +188,10 @@ bool tNMEA2000_esp32xx::CANGetFrame(unsigned long &id, unsigned char &len, unsig
     len = message.data_length_code;
     if (len > 8)
     {
-        logDebug(LOG_DEBUG, "TWAI: received invalid message %ld, len %d", LOGID(id), len);
+        logDebug(LOG_DEBUG, "TWAI: received invalid message %lu, len %d", (unsigned long)LOGID(id), len);
         len = 8;
     }
-    logDebug(LOG_MSG, "TWAI rcv id=%d,len=%d, ext=%d", LOGID(message.identifier), message.data_length_code, message.extd);
+    logDebug(LOG_MSG, "TWAI rcv id=%lu,len=%d, ext=%d", (unsigned long)LOGID(message.identifier), message.data_length_code, message.extd);
     if (!message.rtr)
     {
         memcpy(buf, message.data, len);
@@ -258,12 +259,16 @@ void tNMEA2000_esp32xx::InitCANFrameBuffers()
         g_config.rx_queue_len = MaxCANReceiveFrames;  // Use configured buffer size instead of hardcoded 40
         g_config.intr_flags |= ESP_INTR_FLAG_LOWMED; // LOWMED might be needed if you run out of LEVEL1 interrupts.
 
-        twai_timing_config_t t_config;
-        // ESP_IDF DEFAULT TIMING CONFIGURATION gives 80% sample point
-        // #define TWAI_TIMING_CONFIG_250KBITS()   {.brp = 16, .tseg_1 = 15, .tseg_2 = 4, .sjw = 3, .triple_sampling = false}
-        // t_config = TWAI_TIMING_CONFIG_250KBITS();
+        // Start with the default timing configuration, so we get sane values for new fields
+        twai_timing_config_t t_config; // = TWAI_TIMING_CONFIG_250KBITS();
 
+        // ESP-IDF Default Timing gives 80% sample point
         // But NMEA2000 requires sample point at 87%
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+        // ESP-IDF 5.x requires explicit clock source configuration
+        t_config.clk_src = TWAI_CLK_SRC_DEFAULT;
+        t_config.quanta_resolution_hz = 0; // Let driver calculate from brp
+#endif
         t_config.brp = 20; // divide 80MHz APB clock by 20 = 4MHz. At 250Kbps, 4MHz = 16 time quanta (including sync)
         // Want sample at 87%: sample_point = (0.875 * 16) = 14
         t_config.tseg_1 = 13; // tseg_1 = (sample_point - sync) = (14 - 1) = 13
@@ -274,8 +279,8 @@ void tNMEA2000_esp32xx::InitCANFrameBuffers()
         * false: the bus is sampled once; recommended for high speed buses (SAE class C)*/
         t_config.triple_sampling = true;
 
-        logDebug(LOG_DEBUG, "TWAI timing config: brp=%d tseg1=%d tseg2=%d sjw=%d triple_sampling=%d",
-            t_config.brp, t_config.tseg_1, t_config.tseg_2, t_config.sjw, t_config.triple_sampling);
+        logDebug(LOG_DEBUG, "TWAI timing config: brp=%u tseg1=%u tseg2=%u sjw=%u triple_sampling=%d",
+            (unsigned)t_config.brp, (unsigned)t_config.tseg_1, (unsigned)t_config.tseg_2, (unsigned)t_config.sjw, t_config.triple_sampling ? 1 : 0);
 
         // Filter config
         twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
@@ -285,13 +290,13 @@ void tNMEA2000_esp32xx::InitCANFrameBuffers()
             state = ST_STOPPED; // We start in STOPPED state, user must call CANOpen() to start
             if (LOG_LOCAL_LEVEL >= ESP_LOG_DEBUG)
             {
-                logDebug(LOG_DEBUG, "TWAI driver initialzed, rx=%d,tx=%d, tx_queue=%d, rx_queue=%d",
-                    (int)RxPin, (int)TxPin, g_config.tx_queue_len, g_config.rx_queue_len);
+                logDebug(LOG_DEBUG, "TWAI driver initialzed, rx=%d,tx=%d, tx_queue=%u, rx_queue=%u",
+                    (int)RxPin, (int)TxPin, (unsigned)g_config.tx_queue_len, (unsigned)g_config.rx_queue_len);
                 // Check initial status after driver install but before start
                 twai_status_info_t initial_status;
                 if (ESP_OK == twai_get_status_info(&initial_status)) {
-                    logDebug(LOG_DEBUG, "Initial TWAI status: TXerr=%d RXerr=%d state=%d",
-                        initial_status.tx_error_counter, initial_status.rx_error_counter, initial_status.state);
+                    logDebug(LOG_DEBUG, "Initial TWAI status: TXerr=%u RXerr=%u state=%d",
+                        (unsigned)initial_status.tx_error_counter, (unsigned)initial_status.rx_error_counter, initial_status.state);
                 }
             }
         }
@@ -395,8 +400,8 @@ void tNMEA2000_esp32xx::loop()
                 else
                 {
                     // No other nodes detected - go back offline to try again
-                    logDebug(LOG_DEBUG, "Bus probe indicates NO other nodes present (TXerr: %d)",
-                        twai_status.tx_error_counter);
+                    logDebug(LOG_DEBUG, "Bus probe indicates NO other nodes present (TXerr: %u)",
+                        (unsigned)twai_status.tx_error_counter);
                     twai_stop();
                     next_state = ST_STOPPED;
                 }
@@ -409,8 +414,8 @@ void tNMEA2000_esp32xx::loop()
 
                 // Check for Error Passive condition with full queue - this causes the timeout cascade
                 if (twai_status.tx_error_counter >= 128) {
-                    logDebug(LOG_ERR, "Detected Error Passive (TXerr=%d, queue=%d) - (maybe disconnected or only node on bus)",
-                        twai_status.tx_error_counter, twai_status.msgs_to_tx);
+                    logDebug(LOG_ERR, "Detected Error Passive (TXerr=%u, queue=%u) - (maybe disconnected or only node on bus)",
+                        (unsigned)twai_status.tx_error_counter, (unsigned)twai_status.msgs_to_tx);
                     twai_stop();
                     next_state = ST_STOPPED;
                     break;
