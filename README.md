@@ -1,25 +1,12 @@
-# NMEA2000_esp32xx library for ESP32xx boards using TWAI driver
+# NMEA2000_esp32_autorestart
+library for ESP32xx boards using TWAI driver with auto-restart logic
 
 | Supported Targets | ESP32 | ESP32-C2 | ESP32-C3 | ESP32-S2 | ESP32-S3 |
 |------------------|-------|----------|----------|----------|----------|
 | ESP-IDF 4.x      | Yes   | ?        | ?        | ?        | ?        |
 | ESP-IDF 5.x      | Yes   | ?        | YES      | ?        | ?        |
 
-Driver component for [NMEA2000](https://github.com/ttlappalainen/NMEA2000) library for ESP32 Boards.
-
-To use this library, you will also need NMEA2000 library.
-
-The library defines as default Tx pin to GPIO 16 and Rx pin to GPIO 4. You can 
-change these with defines:
-
-```c
-#define ESP32_CAN_TX_PIN GPIO_NUM_5
-#define ESP32_CAN_RX_PIN GPIO_NUM_4
-```
-
-before including NMEA2000_CAN.h or NMEA2000_esp32xx.h
-
-A working example can be found at [NMEA2000-windesp32xx-idf](https://github.com/jiauka/NMEA2000-windesp32xx-idf) library
+CAN Driver component for the [NMEA2000](https://github.com/ttlappalainen/NMEA2000) library for ESP32 targets.
 
 ## NMEA2000_esp32xx Driver State Machine
 This driver contains an error recovery state-machine. It will automatically restart the N2K stack if the cable is disconnected/reconnected or if it reaches an error threshold that results in a BUS_OFF condition.
@@ -43,6 +30,10 @@ stateDiagram-v2
     
     RECOVERING --> STOPPED: (CAN bus recovered)<br/>reset timeout
 ```
+
+## Usage
+
+For a working example project using this component see: [NMEA2000_switchbank_example_esp-idf](https://github.com/phatpaul/NMEA2000_switchbank_example_esp-idf)
 
 Some tweaks to sdkconfig that are recommended:
 
