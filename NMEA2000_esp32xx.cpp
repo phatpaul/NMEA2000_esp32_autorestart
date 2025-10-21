@@ -54,7 +54,7 @@ OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 const char *TAG = "N2K-drv"; // just a tag for logging
 
-static const int TIMEOUT_OFFLINE = 256; // # of consecutive timeouts to consider OFFLINE
+static const int TIMEOUT_OFFLINE = 16; // # of consecutive timeouts to consider driver frozen
 
 const char *tNMEA2000_esp32xx::stateStr(const tNMEA2000_esp32xx::STATE &st)
 {
@@ -92,6 +92,7 @@ tNMEA2000_esp32xx::Status tNMEA2000_esp32xx::getStatus()
     rt.tx_failed = twai_status.tx_failed_count;
     rt.rx_missed = twai_status.rx_missed_count;
     rt.rx_overrun = twai_status.rx_overrun_count;
+    rt.tx_timeouts = txTimeouts;
     rt.tx_queued = twai_status.msgs_to_tx;
     rt.state = state;
     return rt;
@@ -100,14 +101,16 @@ tNMEA2000_esp32xx::Status tNMEA2000_esp32xx::getStatus()
 tNMEA2000_esp32xx::Status tNMEA2000_esp32xx::logStatus()
 {
     Status canState = getStatus();
-    logDebug(LOG_INFO, "TWAI state %s, rxerr %u, txerr %u, txfail %u, rxmiss %u, rxoverrun %u, txqueued %u",
+    logDebug(LOG_INFO, "TWAI state %s, rxerr %u, txerr %u, txfail %u, rxmiss %u, rxoverrun %u, txqueued %u, txtimeouts %u",
         stateStr(canState.state),
         (unsigned)canState.rx_errors,
         (unsigned)canState.tx_errors,
         (unsigned)canState.tx_failed,
         (unsigned)canState.rx_missed,
         (unsigned)canState.rx_overrun,
-        (unsigned)canState.tx_queued);
+        (unsigned)canState.tx_queued,
+        (unsigned)txTimeouts
+    );
     return canState;
 }
 
@@ -156,6 +159,7 @@ bool tNMEA2000_esp32xx::CANSendFrame(unsigned long id, unsigned char len, const 
     }
     if (rt == ESP_ERR_TIMEOUT)
     {
+        txTimeouts++;
         logDebug(LOG_DEBUG, "TWAI tx timeout");
         return false;
     }
@@ -165,6 +169,7 @@ bool tNMEA2000_esp32xx::CANSendFrame(unsigned long id, unsigned char len, const 
         return false;
     }
 
+    txTimeouts = 0; // reset timeouts counter on a successful send
     return true;
 }
 
@@ -282,12 +287,18 @@ void tNMEA2000_esp32xx::InitCANFrameBuffers()
         logDebug(LOG_DEBUG, "TWAI timing config: brp=%u tseg1=%u tseg2=%u sjw=%u triple_sampling=%d",
             (unsigned)t_config.brp, (unsigned)t_config.tseg_1, (unsigned)t_config.tseg_2, (unsigned)t_config.sjw, t_config.triple_sampling ? 1 : 0);
 
-        // Filter config
+        // Filter config - accept all messages
         twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+
+        txTimeouts = 0;
+
+        // Install the driver
         esp_err_t rt = twai_driver_install(&g_config, &t_config, &f_config);
         if (rt == ESP_OK)
         {
             state = ST_STOPPED; // We start in STOPPED state, user must call CANOpen() to start
+
+            // Debug logging of initial status
             if (LOG_LOCAL_LEVEL >= ESP_LOG_DEBUG)
             {
                 logDebug(LOG_DEBUG, "TWAI driver initialzed, rx=%d,tx=%d, tx_queue=%u, rx_queue=%u",
@@ -400,7 +411,7 @@ void tNMEA2000_esp32xx::loop()
                 else
                 {
                     // No other nodes detected - go back offline to try again
-                    logDebug(LOG_DEBUG, "Bus probe indicates NO other nodes present (TXerr: %u)",
+                    logDebug(LOG_DEBUG, "Bus probe indicates NO other nodes present (TXerr=%u)",
                         (unsigned)twai_status.tx_error_counter);
                     twai_stop();
                     next_state = ST_STOPPED;
@@ -412,10 +423,18 @@ void tNMEA2000_esp32xx::loop()
                 // TWAI_STATE_BUS_OFF is entered automatically when the hardware detects too many errors on the bus
                 // Transition to BUS_OFF is handled in common.
 
-                // Check for Error Passive condition with full queue - this causes the timeout cascade
+                // Check for Error Passive condition
                 if (twai_status.tx_error_counter >= 128) {
-                    logDebug(LOG_ERR, "Detected Error Passive (TXerr=%u, queue=%u) - (maybe disconnected or only node on bus)",
-                        (unsigned)twai_status.tx_error_counter, (unsigned)twai_status.msgs_to_tx);
+                    logDebug(LOG_ERR, "Detected Error Passive (Disconnected or only node on bus) (TXerr=%u) -> Stopping",
+                        (unsigned)twai_status.tx_error_counter);
+                    twai_stop();
+                    next_state = ST_STOPPED;
+                    break;
+                }
+                // Check for TX timeouts indicating frozen driver
+                if (txTimeouts >= TIMEOUT_OFFLINE) {
+                    logDebug(LOG_ERR, "Detected Frozen Driver (TxTimeouts=%u) -> Stopping",
+                        (unsigned)txTimeouts);
                     twai_stop();
                     next_state = ST_STOPPED;
                     break;

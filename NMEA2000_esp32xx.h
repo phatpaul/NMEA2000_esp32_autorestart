@@ -30,6 +30,7 @@ public:
         uint32_t tx_failed = 0;
         uint32_t rx_missed = 0;
         uint32_t rx_overrun = 0;
+        uint32_t tx_timeouts = 0;
         uint32_t tx_queued = 0;
         STATE state = ST_ERROR;
     } Status;
@@ -59,6 +60,7 @@ private:
     int TxPin;
     tN2kSyncScheduler recoveryTimer;
     tN2kSyncScheduler logTimer;
+    uint32_t txTimeouts;
     STATE state = ST_STOPPED;
 };
 

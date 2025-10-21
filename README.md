@@ -1,12 +1,11 @@
 # NMEA2000_esp32_autorestart
-library for ESP32xx boards using TWAI driver with auto-restart logic
 
 | Supported Targets | ESP32 | ESP32-C2 | ESP32-C3 | ESP32-S2 | ESP32-S3 |
 |------------------|-------|----------|----------|----------|----------|
 | ESP-IDF 4.x      | Yes   | ?        | ?        | ?        | ?        |
 | ESP-IDF 5.x      | Yes   | ?        | YES      | ?        | ?        |
 
-CAN Driver component for the [NMEA2000](https://github.com/ttlappalainen/NMEA2000) library for ESP32 targets.
+CAN Driver component for the [NMEA2000](https://github.com/ttlappalainen/NMEA2000) library for ESP32 targets with auto-restart logic.
 
 ## NMEA2000_esp32xx Driver State Machine
 This driver contains an error recovery state-machine. It will automatically restart the N2K stack if the cable is disconnected/reconnected or if it reaches an error threshold that results in a BUS_OFF condition.
