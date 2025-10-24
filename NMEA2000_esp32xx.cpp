@@ -248,9 +248,8 @@ bool tNMEA2000_esp32xx::CANOpen()
     return true;
 }
 
-// This will be called on Open() before any other initialization. Inherit this, if buffers can be set for the driver
-// and you want to change size of library send frame buffer size. See e.g. NMEA2000_teensy.cpp.
-void tNMEA2000_esp32xx::InitCANFrameBuffers()
+// Initialize ESP32 TWAI driver
+void tNMEA2000_esp32xx::installEspCanDriver()
 {
     if (ST_DISABLED == state)
     {
@@ -317,6 +316,25 @@ void tNMEA2000_esp32xx::InitCANFrameBuffers()
             state = ST_DISABLED;
         }
     }
+}
+
+// Uninstall the driver.  Undo what is done in installEspCanDriver()
+void tNMEA2000_esp32xx::uninstallEspCanDriver()
+{
+    if (state != ST_DISABLED)
+    {
+        twai_stop();
+        twai_driver_uninstall();
+        state = ST_DISABLED;
+    }
+}
+
+// This will be called on Open() before any other initialization. Inherit this, if buffers can be set for the driver
+// and you want to change size of library send frame buffer size. See e.g. NMEA2000_teensy.cpp.
+void tNMEA2000_esp32xx::InitCANFrameBuffers()
+{
+    // Initialize ESP32 TWAI driver
+    installEspCanDriver();
 
     // call parent function
     tNMEA2000::InitCANFrameBuffers();
@@ -325,12 +343,7 @@ void tNMEA2000_esp32xx::InitCANFrameBuffers()
 // Uninstall the driver.  Undo what is done in InitCANFrameBuffers()
 void tNMEA2000_esp32xx::DeinitCANFrameBuffers()
 {
-    if (state != ST_DISABLED)
-    {
-        twai_stop();
-        twai_driver_uninstall();
-        state = ST_DISABLED;
-    }
+    uninstallEspCanDriver();
 }
 
 // Destructor to automatically uninstall the driver if the object goes out of scope or is deleted.
@@ -428,15 +441,16 @@ void tNMEA2000_esp32xx::loop()
                     logDebug(LOG_ERR, "Detected Error Passive (Disconnected or only node on bus) (TXerr=%u) -> Stopping",
                         (unsigned)twai_status.tx_error_counter);
                     twai_stop();
-                    next_state = ST_STOPPED;
+                    next_state = ST_STOPPED; // This starts a timer for later restarting NMEA2000 stack
                     break;
                 }
                 // Check for TX timeouts indicating frozen driver
                 if (txTimeouts >= TIMEOUT_OFFLINE) {
-                    logDebug(LOG_ERR, "Detected Frozen Driver (TxTimeouts=%u) -> Stopping",
+                    logDebug(LOG_ERR, "Detected Frozen Driver (TxTimeouts=%u) -> Reinstall Driver",
                         (unsigned)txTimeouts);
-                    twai_stop();
-                    next_state = ST_STOPPED;
+                    uninstallEspCanDriver();
+                    installEspCanDriver();
+                    next_state = ST_STOPPED; // This starts a timer for later restarting NMEA2000 stack
                     break;
                 }
             }

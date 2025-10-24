@@ -56,6 +56,8 @@ private:
 
 private:
     Status logStatus();
+    void installEspCanDriver();
+    void uninstallEspCanDriver();
     int RxPin;
     int TxPin;
     tN2kSyncScheduler recoveryTimer;
