@@ -24,11 +24,11 @@ HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTIO
 CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
 OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
+#include "NMEA2000_esp32xx.h"
+
 //#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG /* Enable this to show debug logging for this file only. */
 #include "esp_log.h"
 #include <inttypes.h>
-
-#include "NMEA2000_esp32xx.h"
 #include "driver/twai.h"
 
 #define LOGID(id) ((id >> 8) & 0x1ffff)
@@ -68,7 +68,7 @@ const char *tNMEA2000_esp32xx::stateStr(const tNMEA2000_esp32xx::STATE &st)
         return "RUNNING";
     case ST_STOPPED:
         return "STOPPED";
-    case ST_RESTARTING:
+    case ST_PROBE_BUS:
         return "RESTARTING";
     case ST_DISABLED:
         return "DISABLED";
@@ -359,89 +359,98 @@ tNMEA2000_esp32xx::~tNMEA2000_esp32xx()
  */
 void tNMEA2000_esp32xx::loop()
 {
+    if (ST_DISABLED == state)
+    {
+        return; // No way out of DISABLED state
+    }
 
-    // No way out of DISABLED state
-    if (ST_DISABLED != state)
+    twai_status_info_t twai_status;
+    if (ESP_OK != twai_get_status_info(&twai_status))
+    {
+        logDebug(LOG_ERR, "TWAI driver broken");
+        state = ST_DISABLED; // TWAI driver is broken, no need to keep trying and spamming logs
+        return;
+    }
+
+    tNMEA2000_esp32xx::STATE next_state = ST_INVALID;
+    // Some state transition are unconditional of current state, so are moved out of the switch()
+    if ((TWAI_STATE_STOPPED == twai_status.state) && (ST_STOPPED != state))
+    {
+        next_state = ST_STOPPED;
+    }
+    else if ((TWAI_STATE_BUS_OFF == twai_status.state) && (ST_BUS_OFF != state))
+    {
+        // reload timer for waiting in RESTARTING before restart the stack
+        recoveryTimer.UpdateNextTime();
+        next_state = ST_BUS_OFF;
+    }
+    else if ((TWAI_STATE_RECOVERING == twai_status.state) && (ST_RECOVERING != state))
+    {
+        next_state = ST_RECOVERING;
+    }
+    // Note: We use TWAI_STATE_RUNNING as a condition in our state machine
+    else
     {
         const bool autoRecoveryEnabled = (0 != recoveryTimer.GetPeriod());
-        twai_status_info_t twai_status;
-        if (ESP_OK != twai_get_status_info(&twai_status))
+        switch (state)
         {
-            logDebug(LOG_ERR, "TWAI driver broken");
-            state = ST_DISABLED; // TWAI driver is broken, no need to keep trying and spamming logs
-            return;
-        }
-
-        tNMEA2000_esp32xx::STATE next_state = ST_INVALID;
-        // Some state transition are unconditional of current state, so are moved out of the switch()
-        if ((TWAI_STATE_STOPPED == twai_status.state) && (ST_STOPPED != state))
+        case ST_STOPPED:
         {
-            next_state = ST_STOPPED;
-        }
-        else if ((TWAI_STATE_BUS_OFF == twai_status.state) && (ST_BUS_OFF != state))
-        {
-            next_state = ST_BUS_OFF;
-        }
-        else if ((TWAI_STATE_RECOVERING == twai_status.state) && (ST_RECOVERING != state))
-        {
-            next_state = ST_RECOVERING;
-        }
-        // Note: We use TWAI_STATE_RUNNING as a condition in our state machine
-        else
-        {
-            switch (state)
+            if (TWAI_STATE_RUNNING == twai_status.state)
             {
-            case ST_STOPPED:
-            {
-                if (TWAI_STATE_RUNNING == twai_status.state)
-                {
-                    // If stack or user called CANOpen(), keep track.
-                    next_state = ST_RUNNING;
-                    break;
-                }
-                if (autoRecoveryEnabled && recoveryTimer.IsTime())
-                {
-                    recoveryTimer.Disable(); // one-shot
-                    CANOpen();
-                    next_state = ST_RESTARTING;
-                    break;
-                }
+                // If stack or user called CANOpen(), keep track.
+                next_state = ST_RUNNING;
+                // reload timer for waiting in RUNNING before checking for errors
+                recoveryTimer.UpdateNextTime();
+                break;
             }
-            break;
-            case ST_RESTARTING:
-            {
-                // Check if transmission caused error increment (indicates no other nodes)
-                bool other_nodes_present = (0 == twai_status.tx_error_counter);
-
-                // Only restart NMEA2000 library if we detected other nodes during probe
-                // This prevents bus flooding when we're the only device
-                if (other_nodes_present)
-                {
-                    // Now the higher-level NMEA2000 library should be restarted!
-                    tNMEA2000::Restart();
-                    next_state = ST_RUNNING;
-                }
-                else
-                {
-                    // No other nodes detected - go back offline to try again
-                    logDebug(LOG_DEBUG, "Bus probe indicates NO other nodes present (TXerr=%u)",
-                        (unsigned)twai_status.tx_error_counter);
-                    twai_stop();
-                    next_state = ST_STOPPED;
-                }
+            else {
+                // (Re)start CAN bus
+                CANOpen();
+                next_state = ST_PROBE_BUS;
+                // reload timer for waiting in PROBE_BUS for other nodes before restarting the stack
+                recoveryTimer.UpdateNextTime();
+                break;
             }
-            break;
-            case ST_RUNNING: // Normal running state
-            {
-                // TWAI_STATE_BUS_OFF is entered automatically when the hardware detects too many errors on the bus
-                // Transition to BUS_OFF is handled in common.
+        }
+        break;
+        case ST_PROBE_BUS:
+        {
+            // Check if transmission caused error increment (indicates no other nodes)
+            bool other_nodes_present = (0 == twai_status.tx_error_counter);
 
+            // Only restart NMEA2000 library if we detected other nodes during probe
+            if (other_nodes_present)
+            {
+                // Now the higher-level NMEA2000 library should be restarted!
+                tNMEA2000::Restart();
+                next_state = ST_RUNNING;
+            }
+            // Wait for recovery timer if no other nodes detected, then go back to STOPPED and try again
+            else if (autoRecoveryEnabled && recoveryTimer.IsTime())
+            {
+                recoveryTimer.Disable(); // one-shot
+                // No other nodes detected - go back offline to try again
+                logDebug(LOG_DEBUG, "Bus probe indicates NO other nodes present (TXerr=%u)",
+                    (unsigned)twai_status.tx_error_counter);
+                twai_stop();
+                next_state = ST_STOPPED;
+            }
+        }
+        break;
+        case ST_RUNNING: // Normal running state
+        {
+            // TWAI_STATE_BUS_OFF is entered automatically when the hardware detects too many errors on the bus
+            // Transition to BUS_OFF is handled in common.
+
+            // Delay error checks in RUNNING state until recovery timer expires
+            if (autoRecoveryEnabled && recoveryTimer.IsTime()) {
                 // Check for Error Passive condition
                 if (twai_status.tx_error_counter >= 128) {
                     logDebug(LOG_ERR, "Detected Error Passive (Disconnected or only node on bus) (TXerr=%u) -> Stopping",
                         (unsigned)twai_status.tx_error_counter);
                     twai_stop();
-                    next_state = ST_STOPPED; // This starts a timer for later restarting NMEA2000 stack
+                    next_state = ST_STOPPED; // Transition to STOPPED, then will try to restart...
                     break;
                 }
                 // Check for TX timeouts indicating frozen driver
@@ -450,53 +459,49 @@ void tNMEA2000_esp32xx::loop()
                         (unsigned)txTimeouts);
                     uninstallEspCanDriver();
                     installEspCanDriver();
-                    next_state = ST_STOPPED; // This starts a timer for later restarting NMEA2000 stack
+                    next_state = ST_STOPPED; // Transition to STOPPED, then will try to restart...
                     break;
                 }
             }
-            break;
-            case ST_BUS_OFF:
+        }
+        break;
+        case ST_BUS_OFF:
+        {
+            if (autoRecoveryEnabled && recoveryTimer.IsTime())
             {
-                if (autoRecoveryEnabled)
-                {
-                    // If auto recovery enabled, try to recover
-                    twai_initiate_recovery(); // Needs 128 occurrences of bus free signal
-                    next_state = ST_RECOVERING;
-                    break;
-                }
-            }
-            break;
-            case ST_RECOVERING:
-            {
-                // TWAI driver should handle recovery and set state to STOPPED when successful
-                // Transition to STOPPED is handled in common
-            }
-            break;
-            case ST_DISABLED:
-                // No way out of DISABLED state
-                break;
-            case ST_ERROR:
-                // No way out of ERROR state
-                break;
-            default:
-                next_state = ST_ERROR;
+                // If auto recovery enabled, try to recover
+                twai_initiate_recovery(); // Needs 128 occurrences of bus free signal
+                next_state = ST_RECOVERING;
                 break;
             }
         }
-
-        if (ST_INVALID != next_state)
+        break;
+        case ST_RECOVERING:
         {
-            // State changed. Do common stuff on state transitions.
-            if (ST_STOPPED == next_state)
-            {
-                // reload timer for waiting in STOPPED before restarting
-                recoveryTimer.UpdateNextTime();
-            }
-            logDebug(LOG_DEBUG, "TWAI %s --> %s", stateStr(state), stateStr(next_state));
-            state = next_state;
+            // TWAI driver should handle recovery and set state to STOPPED when successful
+            // Transition to STOPPED is handled in common
+        }
+        break;
+        case ST_DISABLED:
+            // No way out of DISABLED state
+            break;
+        case ST_ERROR:
+            // No way out of ERROR state
+            break;
+        default:
+            next_state = ST_ERROR;
+            break;
         }
     }
 
+    if (ST_INVALID != next_state)
+    {
+        // State changed. Do common stuff on state transitions.
+        logDebug(LOG_DEBUG, "TWAI %s --> %s", stateStr(state), stateStr(next_state));
+        state = next_state;
+    }
+
+    // Periodic logging
     if (logTimer.IsTime())
     {
         logTimer.UpdateNextTime();

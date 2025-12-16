@@ -5,7 +5,7 @@
 class tNMEA2000_esp32xx : public tNMEA2000
 {
 public:
-    tNMEA2000_esp32xx(int _TxPin, int _RxPin, unsigned long recoveryPeriod = 6000, unsigned long logPeriod = 0);
+    tNMEA2000_esp32xx(int _TxPin, int _RxPin, unsigned long recoveryPeriod = 3000, unsigned long logPeriod = 0);
 
     static const int LOG_ERR = 0;
     static const int LOG_INFO = 1;
@@ -18,7 +18,7 @@ public:
         ST_RUNNING,
         ST_BUS_OFF,
         ST_RECOVERING,
-        ST_RESTARTING,
+        ST_PROBE_BUS,
         ST_DISABLED,
         ST_ERROR
     } STATE;

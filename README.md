@@ -13,21 +13,23 @@ This driver contains an error recovery state-machine. It will automatically rest
 ```mermaid
 ---
 title: NMEA2000_esp32xx Driver State Machine
+config: 
+  theme: 'dark'
 ---
 stateDiagram-v2
 
     [*] --> STOPPED
+    STOPPED --> PROBE_BUS: (){twai_start()<br>SendProbe()<br>timer=0}
+    STOPPED --> RUNNING: (started by N2K stack)<br>{timer=0}
     
-    STOPPED --> RESTARTING: (autoRecoveryEnabled && timeout)<br/>twai_start()<br/>SendDummyFrame()
-    STOPPED --> RUNNING: started by N2K stack
+    PROBE_BUS --> RUNNING: (TxErr==0){tNMEA2000#58;#58;Restart()}
+    PROBE_BUS --> STOPPED: (timer>=3s)<br>{twai_stop()}
     
-    RESTARTING --> RUNNING: tNMEA2000..Restart()
-    RESTARTING --> STOPPED: (TxErr>0)<br/>reset timeout
+    RUNNING --> STOPPED: (TxErr>=128 &<br>timer>=3s)<br>{twai_stop()}
     
-    RUNNING --> RECOVERING: CAN bus error
-    RUNNING --> STOPPED: (TxErr>=128)<br/>reset timeout
-    
-    RECOVERING --> STOPPED: (CAN bus recovered)<br/>reset timeout
+    RECOVERING --> STOPPED: (twai STOPPED)
+    (any) --> BUS_OFF: (twai BUS_OFF)<br>{timer=0}
+    BUS_OFF --> RECOVERING: (timer>=3s)<br>{twai_initiate_recovery()}
 ```
 
 ## Usage
@@ -56,8 +58,9 @@ CONFIG_FREERTOS_HZ=1000
   - V0.2 code cleanup
 * **2024-03-25** - Paul Abbott "phatpaul"
   - Improved with error handling inspired by wellenvogel - see https://github.com/wellenvogel/esp32-nmea2000/issues/67
-* **2024-10-25** - Paul Abbott "phatpaul"
-  - Improved with proper CAN bus recovery process. see https://github.com/phatpaul/NMEA2000_esp32xx
+* **2025-12-16** - Paul Abbott "phatpaul"
+  - Improved with proper CAN bus recovery process. Also bus cable disconnected/reconnected detection and logic to auto restart the NMEA2000 stack.
+  - https://github.com/phatpaul/NMEA2000_esp32_autorestart
 
 ## License
 
