@@ -5,12 +5,13 @@
 class tNMEA2000_esp32xx : public tNMEA2000
 {
 public:
-    tNMEA2000_esp32xx(int _TxPin, int _RxPin, unsigned long recoveryPeriod = 3000, unsigned long logPeriod = 0);
+    tNMEA2000_esp32xx(int _TxPin, int _RxPin, unsigned long recoveryPeriod = 1000, unsigned long logPeriod = 0);
 
     static const int LOG_ERR = 0;
     static const int LOG_INFO = 1;
     static const int LOG_DEBUG = 2;
     static const int LOG_MSG = 3;
+    // Auto-restart states. See State-Machine diagram in README.md
     typedef enum
     {
         ST_INVALID,
@@ -22,6 +23,13 @@ public:
         ST_DISABLED,
         ST_ERROR
     } STATE;
+    typedef enum
+    {
+        ERR_ACTIVE,
+        ERR_WARNING,
+        ERR_PASSIVE,
+        ERR_BUS_OFF,
+    } ERR_STATE;
     typedef struct
     {
         // see https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/twai.html#_CPPv418twai_status_info_t
@@ -33,8 +41,10 @@ public:
         uint32_t tx_timeouts = 0;
         uint32_t tx_queued = 0;
         STATE state = ST_ERROR;
+        ERR_STATE err_state = ERR_ACTIVE;
     } Status;
     static const char *stateStr(const STATE &st);
+    static const char *errStateStr(const ERR_STATE &st);
     Status getStatus();
 
     virtual bool CANOpen();
@@ -55,7 +65,8 @@ private:
     virtual void logDebug(int level, const char *fmt, ...) {}
 
 private:
-    Status logStatus();
+    void logStatus(const tNMEA2000_esp32xx::Status &canState);
+    tNMEA2000_esp32xx::Status getStatus(const void *twai_status_ptr);
     void installEspCanDriver();
     void uninstallEspCanDriver();
     int RxPin;

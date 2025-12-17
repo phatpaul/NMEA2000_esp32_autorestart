@@ -7,12 +7,12 @@
 
 CAN Driver component for the [NMEA2000](https://github.com/ttlappalainen/NMEA2000) library for ESP32 targets with auto-restart logic.
 
-## NMEA2000_esp32xx Driver State Machine
+## Auto-Restart State Machine
 This driver contains an error recovery state-machine. It will automatically restart the N2K stack if the cable is disconnected/reconnected or if it reaches an error threshold that results in a BUS_OFF condition.
 
 ```mermaid
 ---
-title: NMEA2000_esp32xx Driver State Machine
+title: NMEA2000_esp32_autorestart State Machine Diagram
 config: 
   theme: 'dark'
 ---
@@ -22,14 +22,14 @@ stateDiagram-v2
     STOPPED --> PROBE_BUS: (){twai_start()<br>SendProbe()<br>timer=0}
     STOPPED --> RUNNING: (started by N2K stack)<br>{timer=0}
     
-    PROBE_BUS --> RUNNING: (TxErr==0){tNMEA2000#58;#58;Restart()}
-    PROBE_BUS --> STOPPED: (timer>=3s)<br>{twai_stop()}
+    PROBE_BUS --> RUNNING: (TxErr==0 &<br>timer>=1s){tNMEA2000#58;#58;Restart()}
+    PROBE_BUS --> STOPPED: (TxErr>0 &<br>timer>=1s)<br>{twai_stop()}
     
-    RUNNING --> STOPPED: (TxErr>=128 &<br>timer>=3s)<br>{twai_stop()}
+    RUNNING --> STOPPED: (TxErr>=128 &<br>timer>=1s)<br>{twai_stop()}
     
     RECOVERING --> STOPPED: (twai STOPPED)
     (any) --> BUS_OFF: (twai BUS_OFF)<br>{timer=0}
-    BUS_OFF --> RECOVERING: (timer>=3s)<br>{twai_initiate_recovery()}
+    BUS_OFF --> RECOVERING: (timer>=1s)<br>{twai_initiate_recovery()}
 ```
 
 ## Usage

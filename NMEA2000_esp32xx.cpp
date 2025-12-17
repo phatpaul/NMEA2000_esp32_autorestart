@@ -26,7 +26,7 @@ OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 #include "NMEA2000_esp32xx.h"
 
-//#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG /* Enable this to show debug logging for this file only. */
+// #define LOG_LOCAL_LEVEL ESP_LOG_DEBUG /* Enable this to show debug logging for this file only. */
 #include "esp_log.h"
 #include <inttypes.h>
 #include "driver/twai.h"
@@ -78,15 +78,34 @@ const char *tNMEA2000_esp32xx::stateStr(const tNMEA2000_esp32xx::STATE &st)
     return "ERROR";
 }
 
-tNMEA2000_esp32xx::Status tNMEA2000_esp32xx::getStatus()
+const char *tNMEA2000_esp32xx::errStateStr(const tNMEA2000_esp32xx::ERR_STATE &st)
 {
-    Status rt;
-    twai_status_info_t twai_status;
-    if (ESP_OK != twai_get_status_info(&twai_status))
+    switch (st)
+    {
+    case ERR_ACTIVE:
+        return "ACTIVE";
+    case ERR_WARNING:
+        return "WARNING";
+    case ERR_PASSIVE:
+        return "PASSIVE";
+    case ERR_BUS_OFF:
+        return "BUS_OFF";
+    default:
+        break;
+    }
+    return "--";
+}
+
+tNMEA2000_esp32xx::Status tNMEA2000_esp32xx::getStatus(const void *twai_status_ptr)
+{
+    tNMEA2000_esp32xx::Status rt;
+    if (nullptr == twai_status_ptr)
     {
         rt.state = ST_ERROR;
         return rt;
     }
+    // used a void pointer to avoid including twai.h in the header file, cast it here
+    const twai_status_info_t &twai_status = *static_cast<const twai_status_info_t *>(twai_status_ptr);
     rt.rx_errors = twai_status.rx_error_counter;
     rt.tx_errors = twai_status.tx_error_counter;
     rt.tx_failed = twai_status.tx_failed_count;
@@ -95,13 +114,48 @@ tNMEA2000_esp32xx::Status tNMEA2000_esp32xx::getStatus()
     rt.tx_timeouts = txTimeouts;
     rt.tx_queued = twai_status.msgs_to_tx;
     rt.state = state;
+
+    // Error Active: When both TEC and REC are less than 96, the node is in the active error state, meaning normal operation.
+    // The node participates in bus communication and sends active error flags when errors are detected to actively report them.
+    if ((twai_status.tx_error_counter < 96) && (twai_status.rx_error_counter < 96))
+    {
+        rt.err_state = ERR_ACTIVE;
+    }
+    // Error Warning: When either TEC or REC is greater than or equal to 96 but both are less than 128,
+    // the node is in the warning error state. Errors may exist but the node behavior remains unchanged.
+    else if ((twai_status.tx_error_counter < 128) && (twai_status.rx_error_counter < 128))
+    {
+        rt.err_state = ERR_WARNING;
+    }
+    // Error Passive: When either TEC or REC is greater than or equal to 128, the node enters the passive error state.
+    // It can still communicate on the bus but sends only one passive error flag when detecting errors.
+    else if ((twai_status.tx_error_counter < 256) && (twai_status.rx_error_counter < 256))
+    {
+        rt.err_state = ERR_PASSIVE;
+    }
+    // Bus Off: When TEC is greater than or equal to 256, the node enters the bus off (offline) state.
+    // The node is effectively disconnected and does not affect the bus. It remains offline until recovery is triggered by software.
+    else
+    {
+        rt.err_state = ERR_BUS_OFF;
+    }
+
     return rt;
 }
 
-tNMEA2000_esp32xx::Status tNMEA2000_esp32xx::logStatus()
+tNMEA2000_esp32xx::Status tNMEA2000_esp32xx::getStatus()
 {
-    Status canState = getStatus();
-    logDebug(LOG_INFO, "TWAI state %s, rxerr %u, txerr %u, txfail %u, rxmiss %u, rxoverrun %u, txqueued %u, txtimeouts %u",
+    twai_status_info_t twai_status;
+    if (ESP_OK != twai_get_status_info(&twai_status))
+    {
+        return getStatus(nullptr);
+    }
+    return getStatus(&twai_status);
+}
+
+void tNMEA2000_esp32xx::logStatus(const tNMEA2000_esp32xx::Status &canState)
+{
+    logDebug(LOG_INFO, "TWAI state %s, rxerr %u, txerr %u, txfail %u, rxmiss %u, rxoverrun %u, txqueued %u, txtimeouts %u, errstate %s",
         stateStr(canState.state),
         (unsigned)canState.rx_errors,
         (unsigned)canState.tx_errors,
@@ -109,11 +163,10 @@ tNMEA2000_esp32xx::Status tNMEA2000_esp32xx::logStatus()
         (unsigned)canState.rx_missed,
         (unsigned)canState.rx_overrun,
         (unsigned)canState.tx_queued,
-        (unsigned)txTimeouts
+        (unsigned)txTimeouts,
+        errStateStr(canState.err_state)
     );
-    return canState;
 }
-
 
 /**
  * @brief Construct a new tNMEA2000 esp32xx::tNMEA2000 esp32xx object
@@ -126,15 +179,9 @@ tNMEA2000_esp32xx::Status tNMEA2000_esp32xx::logStatus()
 tNMEA2000_esp32xx::tNMEA2000_esp32xx(int _TxPin, int _RxPin, unsigned long recoveryPeriod, unsigned long logPeriod)
     : tNMEA2000(), RxPin(_RxPin), TxPin(_TxPin)
 {
-    if (RxPin < 0 || TxPin < 0)
-    {
-        state = ST_DISABLED;
-    }
-    else
-    {
-        recoveryTimer = tN2kSyncScheduler(false, recoveryPeriod, 0);
-        logTimer = tN2kSyncScheduler(false, logPeriod, 0);
-    }
+    // Construct timers
+    recoveryTimer = tN2kSyncScheduler(false, recoveryPeriod, 0);
+    logTimer = tN2kSyncScheduler(false, logPeriod, 0);
 }
 
 bool tNMEA2000_esp32xx::CANSendFrame(unsigned long id, unsigned char len, const unsigned char *buf, bool wait_sent)
@@ -243,16 +290,15 @@ bool tNMEA2000_esp32xx::CANOpen()
         logDebug(LOG_DEBUG, "Sending bus probe frame...");
         twai_transmit(&probe_message, pdMS_TO_TICKS(50)); // 50ms timeout
     }
-    // Start timers now.
-    logTimer.UpdateNextTime();
     return true;
 }
 
 // Initialize ESP32 TWAI driver
 void tNMEA2000_esp32xx::installEspCanDriver()
 {
-    if (ST_DISABLED == state)
+    if (RxPin < 0 || TxPin < 0)
     {
+        state = ST_DISABLED;
         logDebug(LOG_INFO, "TWAI init - disabled");
     }
     else
@@ -321,12 +367,10 @@ void tNMEA2000_esp32xx::installEspCanDriver()
 // Uninstall the driver.  Undo what is done in installEspCanDriver()
 void tNMEA2000_esp32xx::uninstallEspCanDriver()
 {
-    if (state != ST_DISABLED)
-    {
-        twai_stop();
-        twai_driver_uninstall();
-        state = ST_DISABLED;
-    }
+    twai_stop();
+    twai_driver_uninstall();
+    state = ST_DISABLED;
+    logDebug(LOG_INFO, "TWAI driver uninstalled");
 }
 
 // This will be called on Open() before any other initialization. Inherit this, if buffers can be set for the driver
@@ -336,6 +380,9 @@ void tNMEA2000_esp32xx::InitCANFrameBuffers()
     // Initialize ESP32 TWAI driver
     installEspCanDriver();
 
+    // Start log timer now.
+    logTimer.UpdateNextTime();
+
     // call parent function
     tNMEA2000::InitCANFrameBuffers();
 }
@@ -344,6 +391,9 @@ void tNMEA2000_esp32xx::InitCANFrameBuffers()
 void tNMEA2000_esp32xx::DeinitCANFrameBuffers()
 {
     uninstallEspCanDriver();
+
+    // Stop log timer
+    logTimer.Disable();
 }
 
 // Destructor to automatically uninstall the driver if the object goes out of scope or is deleted.
@@ -361,11 +411,19 @@ void tNMEA2000_esp32xx::loop()
 {
     if (ST_DISABLED == state)
     {
-        return; // No way out of DISABLED state
+        return; // No way out of DISABLED state here
     }
-
+    Status status;
     twai_status_info_t twai_status;
     if (ESP_OK != twai_get_status_info(&twai_status))
+    {
+        status = getStatus(nullptr);
+    }
+    else {
+        status = getStatus(&twai_status);
+    }
+
+    if (ST_ERROR == status.state)
     {
         logDebug(LOG_ERR, "TWAI driver broken");
         state = ST_DISABLED; // TWAI driver is broken, no need to keep trying and spamming logs
@@ -416,25 +474,29 @@ void tNMEA2000_esp32xx::loop()
         break;
         case ST_PROBE_BUS:
         {
-            // Check if transmission caused error increment (indicates no other nodes)
-            bool other_nodes_present = (0 == twai_status.tx_error_counter);
-
-            // Only restart NMEA2000 library if we detected other nodes during probe
-            if (other_nodes_present)
-            {
-                // Now the higher-level NMEA2000 library should be restarted!
-                tNMEA2000::Restart();
-                next_state = ST_RUNNING;
-            }
-            // Wait for recovery timer if no other nodes detected, then go back to STOPPED and try again
-            else if (autoRecoveryEnabled && recoveryTimer.IsTime())
+            // Wait for recovery timer to give time for probe frame to accumulate errors if no other nodes present
+            if (autoRecoveryEnabled && recoveryTimer.IsTime())
             {
                 recoveryTimer.Disable(); // one-shot
-                // No other nodes detected - go back offline to try again
-                logDebug(LOG_DEBUG, "Bus probe indicates NO other nodes present (TXerr=%u)",
-                    (unsigned)twai_status.tx_error_counter);
-                twai_stop();
-                next_state = ST_STOPPED;
+                // Check if transmission caused error increment (indicates no other nodes)
+                bool other_nodes_present = (0 == twai_status.tx_error_counter);
+
+                // Only restart NMEA2000 library if we detected other nodes during probe
+                if (other_nodes_present)
+                {
+                    // Now the higher-level NMEA2000 library should be restarted!
+                    tNMEA2000::Restart();
+                    next_state = ST_RUNNING;
+                }
+                // if no other nodes detected, then go back to STOPPED and try again
+                else
+                {
+                    // No other nodes detected - go back offline to try again
+                    logDebug(LOG_DEBUG, "Bus probe indicates NO other nodes present (TXerr=%u)",
+                        (unsigned)twai_status.tx_error_counter);
+                    twai_stop();
+                    next_state = ST_STOPPED;
+                }
             }
         }
         break;
@@ -446,7 +508,7 @@ void tNMEA2000_esp32xx::loop()
             // Delay error checks in RUNNING state until recovery timer expires
             if (autoRecoveryEnabled && recoveryTimer.IsTime()) {
                 // Check for Error Passive condition
-                if (twai_status.tx_error_counter >= 128) {
+                if (ERR_PASSIVE == status.err_state) {
                     logDebug(LOG_ERR, "Detected Error Passive (Disconnected or only node on bus) (TXerr=%u) -> Stopping",
                         (unsigned)twai_status.tx_error_counter);
                     twai_stop();
@@ -483,10 +545,10 @@ void tNMEA2000_esp32xx::loop()
         }
         break;
         case ST_DISABLED:
-            // No way out of DISABLED state
+            // No way out of DISABLED state here
             break;
         case ST_ERROR:
-            // No way out of ERROR state
+            // No way out of ERROR state here
             break;
         default:
             next_state = ST_ERROR;
@@ -497,7 +559,7 @@ void tNMEA2000_esp32xx::loop()
     if (ST_INVALID != next_state)
     {
         // State changed. Do common stuff on state transitions.
-        logDebug(LOG_DEBUG, "TWAI %s --> %s", stateStr(state), stateStr(next_state));
+        logDebug(LOG_DEBUG, "TWAI %s --> %s (TXerr=%u)", stateStr(state), stateStr(next_state), (unsigned)twai_status.tx_error_counter);
         state = next_state;
     }
 
@@ -505,6 +567,6 @@ void tNMEA2000_esp32xx::loop()
     if (logTimer.IsTime())
     {
         logTimer.UpdateNextTime();
-        logStatus();
+        logStatus(status);
     }
 }
