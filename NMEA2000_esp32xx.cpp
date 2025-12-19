@@ -69,7 +69,7 @@ const char *tNMEA2000_esp32xx::stateStr(const tNMEA2000_esp32xx::STATE &st)
     case ST_STOPPED:
         return "STOPPED";
     case ST_PROBE_BUS:
-        return "RESTARTING";
+        return "PROBE_BUS";
     case ST_DISABLED:
         return "DISABLED";
     default:
@@ -471,8 +471,8 @@ void tNMEA2000_esp32xx::loop()
             // Wait for recovery timer to give time for probe frame to accumulate errors if no other nodes present
             if (autoRecoveryEnabled && recoveryTimer.IsTime())
             {
-                // Check if transmission caused error increment (indicates no other nodes)
-                bool other_nodes_present = (0 == twai_status.tx_error_counter);
+                // Check if transmission caused error increment to ERR_PASSIVE state (indicates no other nodes)
+                bool other_nodes_present = (ERR_PASSIVE != status.err_state);
 
                 // Only restart NMEA2000 library if we detected other nodes during probe
                 if (other_nodes_present)
@@ -502,8 +502,8 @@ void tNMEA2000_esp32xx::loop()
             if (autoRecoveryEnabled && recoveryTimer.IsTime()) {
                 // Check for Error Passive condition
                 if (ERR_PASSIVE == status.err_state) {
-                    logDebug(LOG_ERR, "Detected Error Passive (Disconnected or only node on bus) (TXerr=%u) -> Stopping",
-                        (unsigned)twai_status.tx_error_counter);
+                    logDebug(LOG_ERR, "Detected Error Passive (Disconnected or only node on bus) (TXerr=%u RXerr=%u) -> Stopping",
+                        (unsigned)twai_status.tx_error_counter, (unsigned)twai_status.rx_error_counter);
                     twai_stop();
                     next_state = ST_STOPPED; // Transition to STOPPED, then will try to restart...
                     break;
