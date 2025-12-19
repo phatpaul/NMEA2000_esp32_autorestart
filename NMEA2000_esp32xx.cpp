@@ -438,8 +438,6 @@ void tNMEA2000_esp32xx::loop()
     }
     else if ((TWAI_STATE_BUS_OFF == twai_status.state) && (ST_BUS_OFF != state))
     {
-        // reload timer for waiting in RESTARTING before restart the stack
-        recoveryTimer.UpdateNextTime();
         next_state = ST_BUS_OFF;
     }
     else if ((TWAI_STATE_RECOVERING == twai_status.state) && (ST_RECOVERING != state))
@@ -458,16 +456,12 @@ void tNMEA2000_esp32xx::loop()
             {
                 // If stack or user called CANOpen(), keep track.
                 next_state = ST_RUNNING;
-                // reload timer for waiting in RUNNING before checking for errors
-                recoveryTimer.UpdateNextTime();
                 break;
             }
             else {
                 // (Re)start CAN bus
                 CANOpen();
                 next_state = ST_PROBE_BUS;
-                // reload timer for waiting in PROBE_BUS for other nodes before restarting the stack
-                recoveryTimer.UpdateNextTime();
                 break;
             }
         }
@@ -477,7 +471,6 @@ void tNMEA2000_esp32xx::loop()
             // Wait for recovery timer to give time for probe frame to accumulate errors if no other nodes present
             if (autoRecoveryEnabled && recoveryTimer.IsTime())
             {
-                recoveryTimer.Disable(); // one-shot
                 // Check if transmission caused error increment (indicates no other nodes)
                 bool other_nodes_present = (0 == twai_status.tx_error_counter);
 
@@ -516,9 +509,9 @@ void tNMEA2000_esp32xx::loop()
                     break;
                 }
                 // Check for TX timeouts indicating frozen driver
-                if (txTimeouts >= TIMEOUT_OFFLINE) {
+                if (status.tx_timeouts >= TIMEOUT_OFFLINE) {
                     logDebug(LOG_ERR, "Detected Frozen Driver (TxTimeouts=%u) -> Reinstall Driver",
-                        (unsigned)txTimeouts);
+                        (unsigned)status.tx_timeouts);
                     uninstallEspCanDriver();
                     installEspCanDriver();
                     next_state = ST_STOPPED; // Transition to STOPPED, then will try to restart...
@@ -560,6 +553,8 @@ void tNMEA2000_esp32xx::loop()
     {
         // State changed. Do common stuff on state transitions.
         logDebug(LOG_DEBUG, "TWAI %s --> %s (TXerr=%u)", stateStr(state), stateStr(next_state), (unsigned)twai_status.tx_error_counter);
+        // reload timer for waiting in next state (not needed by every state, but safe to do it in common here)
+        recoveryTimer.UpdateNextTime();
         state = next_state;
     }
 

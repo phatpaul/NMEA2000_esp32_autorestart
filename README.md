@@ -22,11 +22,12 @@ stateDiagram-v2
     STOPPED --> PROBE_BUS: (){twai_start()<br>SendProbe()<br>timer=0}
     STOPPED --> RUNNING: (started by N2K stack)<br>{timer=0}
     
-    PROBE_BUS --> RUNNING: (TxErr==0 &<br>timer>=1s){tNMEA2000#58;#58;Restart()}
+    PROBE_BUS --> RUNNING: (TxErr==0 &<br>timer>=1s){tNMEA2000#58;#58;Restart()<br>timer=0}
     PROBE_BUS --> STOPPED: (TxErr>0 &<br>timer>=1s)<br>{twai_stop()}
     
     RUNNING --> STOPPED: (TxErr>=128 &<br>timer>=1s)<br>{twai_stop()}
-    
+    RUNNING --> STOPPED: (TxTimeout>=16 &<br>timer>=1s)<br>{twai_uninstall()<br>twai_install()}
+
     RECOVERING --> STOPPED: (twai STOPPED)
     (any) --> BUS_OFF: (twai BUS_OFF)<br>{timer=0}
     BUS_OFF --> RECOVERING: (timer>=1s)<br>{twai_initiate_recovery()}
