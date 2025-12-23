@@ -30,31 +30,18 @@ OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "esp_log.h"
 #include <inttypes.h>
 #include "driver/twai.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #define LOGID(id) ((id >> 8) & 0x1ffff)
 
-#define logDebug(level, fmt, args...)                     \
-    do                                                    \
-    {                                                     \
-        int esp_level = ESP_LOG_VERBOSE;                  \
-        if (level == LOG_ERR)                             \
-        {                                                 \
-            esp_level = ESP_LOG_ERROR;                    \
-        }                                                 \
-        else if (level == LOG_INFO)                       \
-        {                                                 \
-            esp_level = ESP_LOG_INFO;                     \
-        }                                                 \
-        else if (level == LOG_DEBUG)                      \
-        {                                                 \
-            esp_level = ESP_LOG_DEBUG;                    \
-        }                                                 \
-        ESP_LOG_LEVEL_LOCAL(esp_level, TAG, fmt, ##args); \
-    } while (0)
+// Helper macros for mutex operations
+#define DRIVER_MUTEX_LOCK() if (driverMutex) xSemaphoreTake((SemaphoreHandle_t)driverMutex, portMAX_DELAY)
+#define DRIVER_MUTEX_UNLOCK() if (driverMutex) xSemaphoreGive((SemaphoreHandle_t)driverMutex)
 
 const char *TAG = "N2K-drv"; // just a tag for logging
 
-static const int TIMEOUT_OFFLINE = 16; // # of consecutive timeouts to consider driver frozen
+static const int TIMEOUTS_FROZEN = 16; // # of consecutive timeouts to consider driver frozen
 
 const char *tNMEA2000_esp32xx::stateStr(const tNMEA2000_esp32xx::STATE &st)
 {
@@ -96,7 +83,7 @@ const char *tNMEA2000_esp32xx::errStateStr(const tNMEA2000_esp32xx::ERR_STATE &s
     return "--";
 }
 
-tNMEA2000_esp32xx::Status tNMEA2000_esp32xx::getStatus(const void *twai_status_ptr)
+tNMEA2000_esp32xx::Status tNMEA2000_esp32xx::_getStatus(const void *twai_status_ptr)
 {
     tNMEA2000_esp32xx::Status rt;
     if (nullptr == twai_status_ptr)
@@ -145,17 +132,20 @@ tNMEA2000_esp32xx::Status tNMEA2000_esp32xx::getStatus(const void *twai_status_p
 
 tNMEA2000_esp32xx::Status tNMEA2000_esp32xx::getStatus()
 {
+    DRIVER_MUTEX_LOCK();
     twai_status_info_t twai_status;
     if (ESP_OK != twai_get_status_info(&twai_status))
     {
-        return getStatus(nullptr);
+        DRIVER_MUTEX_UNLOCK();
+        return _getStatus(nullptr);
     }
-    return getStatus(&twai_status);
+    DRIVER_MUTEX_UNLOCK();
+    return _getStatus(&twai_status);
 }
 
-void tNMEA2000_esp32xx::logStatus(const tNMEA2000_esp32xx::Status &canState)
+void tNMEA2000_esp32xx::_logStatus(const tNMEA2000_esp32xx::Status &canState)
 {
-    logDebug(LOG_INFO, "TWAI state %s, rxerr %u, txerr %u, txfail %u, rxmiss %u, rxoverrun %u, txqueued %u, txtimeouts %u, errstate %s",
+    ESP_LOGI(TAG, "TWAI state %s, rxerr %u, txerr %u, txfail %u, rxmiss %u, rxoverrun %u, txqueued %u, txtimeouts %u, errstate %s",
         stateStr(canState.state),
         (unsigned)canState.rx_errors,
         (unsigned)canState.tx_errors,
@@ -182,15 +172,21 @@ tNMEA2000_esp32xx::tNMEA2000_esp32xx(int _TxPin, int _RxPin, unsigned long recov
     // Construct timers
     recoveryTimer = tN2kSyncScheduler(false, recoveryPeriod, 0);
     logTimer = tN2kSyncScheduler(false, logPeriod, 0);
+
+    // Create mutex for protecting driver operations
+    driverMutex = (void *)xSemaphoreCreateMutex();
 }
 
 bool tNMEA2000_esp32xx::CANSendFrame(unsigned long id, unsigned char len, const unsigned char *buf, bool wait_sent)
 {
+    DRIVER_MUTEX_LOCK();
+
     if (ST_RUNNING != state)
     {
+        DRIVER_MUTEX_UNLOCK();
         return false;
     }
-    logDebug(LOG_MSG, "TWAI transmit id %lu, len %d", (unsigned long)LOGID(id), (int)len);
+    ESP_LOGV(TAG, "TWAI transmit id %lu, len %d", (unsigned long)LOGID(id), (int)len);
 
     twai_message_t message;
     memset(&message, 0, sizeof(message));
@@ -202,104 +198,106 @@ bool tNMEA2000_esp32xx::CANSendFrame(unsigned long id, unsigned char len, const 
     if (rt == ESP_ERR_INVALID_STATE)
     {
         // Probably driver not in RUNNING state, don't spam the console here.
+        DRIVER_MUTEX_UNLOCK();
         return false;
     }
     if (rt == ESP_ERR_TIMEOUT)
     {
         txTimeouts++;
-        logDebug(LOG_DEBUG, "TWAI tx timeout");
+        ESP_LOGD(TAG, "TWAI tx timeout");
+        DRIVER_MUTEX_UNLOCK();
         return false;
     }
     if (ESP_OK != rt)
     {
-        logDebug(LOG_ERR, "TWAI tx %lu failed: %x", (unsigned long)LOGID(id), (int)rt);
+        ESP_LOGE(TAG, "TWAI tx %lu failed: %x", (unsigned long)LOGID(id), (int)rt);
+        DRIVER_MUTEX_UNLOCK();
         return false;
     }
 
     txTimeouts = 0; // reset timeouts counter on a successful send
+    DRIVER_MUTEX_UNLOCK();
     return true;
 }
 
 bool tNMEA2000_esp32xx::CANGetFrame(unsigned long &id, unsigned char &len, unsigned char *buf)
 {
+    DRIVER_MUTEX_LOCK();
+
     if (ST_RUNNING != state)
     {
+        DRIVER_MUTEX_UNLOCK();
         return false;
     }
     twai_message_t message;
     esp_err_t rt = twai_receive(&message, 0);
     if (rt != ESP_OK)
     {
+        DRIVER_MUTEX_UNLOCK();
         return false;
     }
     if (!message.extd)
     {
+        DRIVER_MUTEX_UNLOCK();
         return false;
     }
     id = message.identifier;
     len = message.data_length_code;
     if (len > 8)
     {
-        logDebug(LOG_DEBUG, "TWAI: received invalid message %lu, len %d", (unsigned long)LOGID(id), len);
+        ESP_LOGD(TAG, "TWAI: received invalid message %lu, len %d", (unsigned long)LOGID(id), len);
         len = 8;
     }
-    logDebug(LOG_MSG, "TWAI rcv id=%lu,len=%d, ext=%d", (unsigned long)LOGID(message.identifier), message.data_length_code, message.extd);
+    ESP_LOGV(TAG, "TWAI rcv id=%lu,len=%d, ext=%d", (unsigned long)LOGID(message.identifier), message.data_length_code, message.extd);
     if (!message.rtr)
     {
         memcpy(buf, message.data, len);
     }
+    DRIVER_MUTEX_UNLOCK();
     return true;
 }
 
 bool tNMEA2000_esp32xx::CANOpen()
 {
-    if (ST_STOPPED != state) // CANOpen should only be called in STOPPED state
-    {
-        logDebug(LOG_ERR, "CANOpen invalid state");
-        return true;
-    }
-    esp_err_t rt = twai_start();
-    if (rt != ESP_OK)
-    {
-        logDebug(LOG_ERR, "CANOpen failed: %x", (int)rt);
-        state = ST_ERROR;
-        return false;
-    }
-    else
-    {
-        logDebug(LOG_DEBUG, "CANOpen ok");
+    bool ret = false;
+    DRIVER_MUTEX_LOCK();
+    ret = _startEspCanDriver();
+    DRIVER_MUTEX_UNLOCK();
+    return ret;
+}
 
-        // Send a probe frame to detect other nodes on the bus
-        // Use ISO Address Claim (PGN 60928) with invalid temporary address
-        // This is safe because: 1) Standard NMEA2000 message, 2) Invalid claim won't cause conflicts
-        twai_message_t probe_message;
-        memset(&probe_message, 0, sizeof(probe_message));
-        probe_message.identifier = 0x18EEFFFE;  // PGN 60928, src 254 (temporary), dest 255 (global)
-        probe_message.extd = 1;
-        probe_message.data_length_code = 8;
-        // Invalid address claim data - ensures no real address conflict
-        probe_message.data[0] = 0xFF;  // Unique Number (invalid)
-        probe_message.data[1] = 0xFF;
-        probe_message.data[2] = 0xFF;
-        probe_message.data[3] = 0xFF;
-        probe_message.data[4] = 0xFF;  // Device Instance + System Instance (invalid)
-        probe_message.data[5] = 0xFF;  // Function + Device Class (invalid)
-        probe_message.data[6] = 0xFF;  // Reserved + Industry Group (invalid)
-        probe_message.data[7] = 0xFE;  // Reserved + Address (254 = temporary)
+void tNMEA2000_esp32xx::_sendProbeFrame()
+{
+    // Send a probe frame to detect other nodes on the bus
+    // Use ISO Address Claim (PGN 60928) with invalid temporary address
+    // This is safe because: 1) Standard NMEA2000 message, 2) Invalid claim won't cause conflicts
+    twai_message_t probe_message;
+    memset(&probe_message, 0, sizeof(probe_message));
+    probe_message.identifier = 0x18EEFFFE;  // PGN 60928, src 254 (temporary), dest 255 (global)
+    probe_message.extd = 1;
+    probe_message.data_length_code = 8;
+    // Invalid address claim data - ensures no real address conflict
+    probe_message.data[0] = 0xFF;  // Unique Number (invalid)
+    probe_message.data[1] = 0xFF;
+    probe_message.data[2] = 0xFF;
+    probe_message.data[3] = 0xFF;
+    probe_message.data[4] = 0xFF;  // Device Instance + System Instance (invalid)
+    probe_message.data[5] = 0xFF;  // Function + Device Class (invalid)
+    probe_message.data[6] = 0xFF;  // Reserved + Industry Group (invalid)
+    probe_message.data[7] = 0xFE;  // Reserved + Address (254 = temporary)
 
-        logDebug(LOG_DEBUG, "Sending bus probe frame...");
-        twai_transmit(&probe_message, pdMS_TO_TICKS(50)); // 50ms timeout
-    }
-    return true;
+    ESP_LOGD(TAG, "Sending bus probe frame...");
+    twai_transmit(&probe_message, pdMS_TO_TICKS(50)); // 50ms timeout
 }
 
 // Initialize ESP32 TWAI driver
-void tNMEA2000_esp32xx::installEspCanDriver()
+void tNMEA2000_esp32xx::_installEspCanDriver()
 {
     if (RxPin < 0 || TxPin < 0)
     {
         state = ST_DISABLED;
-        logDebug(LOG_INFO, "TWAI init - disabled");
+        ESP_LOGI(TAG, "TWAI init - disabled");
+        return;
     }
     else
     {
@@ -329,7 +327,7 @@ void tNMEA2000_esp32xx::installEspCanDriver()
         * false: the bus is sampled once; recommended for high speed buses (SAE class C)*/
         t_config.triple_sampling = true;
 
-        logDebug(LOG_DEBUG, "TWAI timing config: brp=%u tseg1=%u tseg2=%u sjw=%u triple_sampling=%d",
+        ESP_LOGD(TAG, "TWAI timing config: brp=%u tseg1=%u tseg2=%u sjw=%u triple_sampling=%d",
             (unsigned)t_config.brp, (unsigned)t_config.tseg_1, (unsigned)t_config.tseg_2, (unsigned)t_config.sjw, t_config.triple_sampling ? 1 : 0);
 
         // Filter config - accept all messages
@@ -346,31 +344,49 @@ void tNMEA2000_esp32xx::installEspCanDriver()
             // Debug logging of initial status
             if (LOG_LOCAL_LEVEL >= ESP_LOG_DEBUG)
             {
-                logDebug(LOG_DEBUG, "TWAI driver initialzed, rx=%d,tx=%d, tx_queue=%u, rx_queue=%u",
+                ESP_LOGD(TAG, "TWAI driver initialzed, rx=%d,tx=%d, tx_queue=%u, rx_queue=%u",
                     (int)RxPin, (int)TxPin, (unsigned)g_config.tx_queue_len, (unsigned)g_config.rx_queue_len);
                 // Check initial status after driver install but before start
                 twai_status_info_t initial_status;
                 if (ESP_OK == twai_get_status_info(&initial_status)) {
-                    logDebug(LOG_DEBUG, "Initial TWAI status: TXerr=%u RXerr=%u state=%d",
+                    ESP_LOGD(TAG, "Initial TWAI status: TXerr=%u RXerr=%u state=%d",
                         (unsigned)initial_status.tx_error_counter, (unsigned)initial_status.rx_error_counter, initial_status.state);
                 }
             }
         }
         else
         {
-            logDebug(LOG_ERR, "TWAI driver init failed: %x", (int)rt);
+            ESP_LOGE(TAG, "TWAI driver init failed: %x", (int)rt);
             state = ST_DISABLED;
         }
     }
 }
 
-// Uninstall the driver.  Undo what is done in installEspCanDriver()
-void tNMEA2000_esp32xx::uninstallEspCanDriver()
+bool tNMEA2000_esp32xx::_startEspCanDriver()
 {
+    if (ST_DISABLED == state)
+    {
+        ESP_LOGW(TAG, "TWAI driver start called in DISABLED state");
+        return false;
+    }
+    esp_err_t rt = twai_start();
+    if (rt != ESP_OK)
+    {
+        ESP_LOGE(TAG, "TWAI driver start failed: %x", (int)rt);
+        state = ST_ERROR;
+        return false;
+    }
+    ESP_LOGI(TAG, "TWAI driver started");
+    return true;
+}
+
+// Uninstall the driver.  Undo what is done in _installEspCanDriver()
+void tNMEA2000_esp32xx::_uninstallEspCanDriver()
+{
+    state = ST_DISABLED; // Prevent further CAN operations
     twai_stop();
     twai_driver_uninstall();
-    state = ST_DISABLED;
-    logDebug(LOG_INFO, "TWAI driver uninstalled");
+    ESP_LOGI(TAG, "TWAI driver uninstalled");
 }
 
 // This will be called on Open() before any other initialization. Inherit this, if buffers can be set for the driver
@@ -378,7 +394,9 @@ void tNMEA2000_esp32xx::uninstallEspCanDriver()
 void tNMEA2000_esp32xx::InitCANFrameBuffers()
 {
     // Initialize ESP32 TWAI driver
-    installEspCanDriver();
+    DRIVER_MUTEX_LOCK();
+    _installEspCanDriver();
+    DRIVER_MUTEX_UNLOCK();
 
     // Start log timer now.
     logTimer.UpdateNextTime();
@@ -390,16 +408,27 @@ void tNMEA2000_esp32xx::InitCANFrameBuffers()
 // Uninstall the driver.  Undo what is done in InitCANFrameBuffers()
 void tNMEA2000_esp32xx::DeinitCANFrameBuffers()
 {
-    uninstallEspCanDriver();
+    DRIVER_MUTEX_LOCK();
+    _uninstallEspCanDriver();
+    DRIVER_MUTEX_UNLOCK();
 
     // Stop log timer
     logTimer.Disable();
+
+
 }
 
 // Destructor to automatically uninstall the driver if the object goes out of scope or is deleted.
 tNMEA2000_esp32xx::~tNMEA2000_esp32xx()
 {
     DeinitCANFrameBuffers();
+
+    // Destroy mutex
+    if (driverMutex) {
+        vSemaphoreDelete((SemaphoreHandle_t)driverMutex);
+        driverMutex = nullptr;
+    }
+
     // Base destructor automatically called after this
 }
 
@@ -409,24 +438,27 @@ tNMEA2000_esp32xx::~tNMEA2000_esp32xx()
  */
 void tNMEA2000_esp32xx::loop()
 {
+    DRIVER_MUTEX_LOCK();
     if (ST_DISABLED == state)
     {
+        DRIVER_MUTEX_UNLOCK();
         return; // No way out of DISABLED state here
     }
     Status status;
     twai_status_info_t twai_status;
     if (ESP_OK != twai_get_status_info(&twai_status))
     {
-        status = getStatus(nullptr);
+        status = _getStatus(nullptr);
     }
     else {
-        status = getStatus(&twai_status);
+        status = _getStatus(&twai_status);
     }
 
     if (ST_ERROR == status.state)
     {
-        logDebug(LOG_ERR, "TWAI driver broken");
+        ESP_LOGE(TAG, "TWAI driver broken");
         state = ST_DISABLED; // TWAI driver is broken, no need to keep trying and spamming logs
+        DRIVER_MUTEX_UNLOCK();
         return;
     }
 
@@ -460,7 +492,9 @@ void tNMEA2000_esp32xx::loop()
             }
             else {
                 // (Re)start CAN bus
-                CANOpen();
+                _startEspCanDriver();
+                // Send a probe frame to detect other nodes on the bus
+                _sendProbeFrame();
                 next_state = ST_PROBE_BUS;
                 break;
             }
@@ -485,7 +519,7 @@ void tNMEA2000_esp32xx::loop()
                 else
                 {
                     // No other nodes detected - go back offline to try again
-                    logDebug(LOG_DEBUG, "Bus probe indicates NO other nodes present (TXerr=%u)",
+                    ESP_LOGD(TAG, "Bus probe indicates NO other nodes present (TXerr=%u)",
                         (unsigned)twai_status.tx_error_counter);
                     twai_stop();
                     next_state = ST_STOPPED;
@@ -502,18 +536,19 @@ void tNMEA2000_esp32xx::loop()
             if (autoRecoveryEnabled && recoveryTimer.IsTime()) {
                 // Check for Error Passive condition
                 if (ERR_PASSIVE == status.err_state) {
-                    logDebug(LOG_ERR, "Detected Error Passive (Disconnected or only node on bus) (TXerr=%u RXerr=%u) -> Stopping",
+                    ESP_LOGE(TAG, "Detected Error Passive (Disconnected or only node on bus) (TXerr=%u RXerr=%u) -> Stopping",
                         (unsigned)twai_status.tx_error_counter, (unsigned)twai_status.rx_error_counter);
                     twai_stop();
                     next_state = ST_STOPPED; // Transition to STOPPED, then will try to restart...
                     break;
                 }
                 // Check for TX timeouts indicating frozen driver
-                if (status.tx_timeouts >= TIMEOUT_OFFLINE) {
-                    logDebug(LOG_ERR, "Detected Frozen Driver (TxTimeouts=%u) -> Reinstall Driver",
+                if (status.tx_timeouts >= TIMEOUTS_FROZEN) {
+                    ESP_LOGE(TAG, "Detected Frozen Driver (TxTimeouts=%u) -> Reinstall Driver",
                         (unsigned)status.tx_timeouts);
-                    uninstallEspCanDriver();
-                    installEspCanDriver();
+                    _uninstallEspCanDriver();
+                    // OK that DRIVER_MUTEX is unlocked here inbetween uninstall and install because state is set to ST_DISABLED
+                    _installEspCanDriver();
                     next_state = ST_STOPPED; // Transition to STOPPED, then will try to restart...
                     break;
                 }
@@ -552,16 +587,17 @@ void tNMEA2000_esp32xx::loop()
     if (ST_INVALID != next_state)
     {
         // State changed. Do common stuff on state transitions.
-        logDebug(LOG_DEBUG, "TWAI %s --> %s (TXerr=%u)", stateStr(state), stateStr(next_state), (unsigned)twai_status.tx_error_counter);
+        ESP_LOGD(TAG, "TWAI %s --> %s (TXerr=%u)", stateStr(state), stateStr(next_state), (unsigned)twai_status.tx_error_counter);
         // reload timer for waiting in next state (not needed by every state, but safe to do it in common here)
         recoveryTimer.UpdateNextTime();
         state = next_state;
     }
+    DRIVER_MUTEX_UNLOCK();
 
     // Periodic logging
     if (logTimer.IsTime())
     {
         logTimer.UpdateNextTime();
-        logStatus(status);
+        _logStatus(status);
     }
 }

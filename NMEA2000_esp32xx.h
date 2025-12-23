@@ -7,10 +7,6 @@ class tNMEA2000_esp32xx : public tNMEA2000
 public:
     tNMEA2000_esp32xx(int _TxPin, int _RxPin, unsigned long recoveryPeriod = 1000, unsigned long logPeriod = 0);
 
-    static const int LOG_ERR = 0;
-    static const int LOG_INFO = 1;
-    static const int LOG_DEBUG = 2;
-    static const int LOG_MSG = 3;
     // Auto-restart states. See State-Machine diagram in README.md
     typedef enum
     {
@@ -62,19 +58,19 @@ protected:
     virtual void DeinitCANFrameBuffers();
 
 private:
-    virtual void logDebug(int level, const char *fmt, ...) {}
-
-private:
-    void logStatus(const tNMEA2000_esp32xx::Status &canState);
-    tNMEA2000_esp32xx::Status getStatus(const void *twai_status_ptr);
-    void installEspCanDriver();
-    void uninstallEspCanDriver();
+    void _logStatus(const tNMEA2000_esp32xx::Status &canState);
+    Status _getStatus(const void *twai_status_ptr);
+    void _installEspCanDriver();
+    bool _startEspCanDriver();
+    void _sendProbeFrame();
+    void _uninstallEspCanDriver();
     int RxPin;
     int TxPin;
     tN2kSyncScheduler recoveryTimer;
     tN2kSyncScheduler logTimer;
     uint32_t txTimeouts;
     STATE state = ST_STOPPED;
+    void* driverMutex = nullptr;  // Mutex handle (actually SemaphoreHandle_t) to protect driver operations
 };
 
 #endif
