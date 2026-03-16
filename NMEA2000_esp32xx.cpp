@@ -29,6 +29,7 @@ OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 // #define LOG_LOCAL_LEVEL ESP_LOG_DEBUG /* Enable this to show debug logging for this file only. */
 #include "esp_log.h"
 #include <inttypes.h>
+#include "driver/gpio.h"
 #include "driver/twai.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -334,6 +335,9 @@ void tNMEA2000_esp32xx::_installEspCanDriver()
         twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
         txTimeouts = 0;
+
+        // Workaround for ESP32 TWAI driver issue where Tx is asserted dominant during initialization, which can cause problems on the bus.
+        gpio_set_level((gpio_num_t)TxPin, 1); // Set initial state of Tx pin to HIGH (idle/recessive state for CAN bus)
 
         // Install the driver
         esp_err_t rt = twai_driver_install(&g_config, &t_config, &f_config);
